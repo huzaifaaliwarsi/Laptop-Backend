@@ -66,7 +66,18 @@ app.use('/api/repairs', repairsRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/whatsapp', whatsappRoutes);
 
-// Health check endpoint
+// Root and Health check endpoints
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Retail & Repair Management API is running',
+    timestamp: new Date().toISOString(),
+    service: 'Retail & Repair Management API'
+  });
+});
+
+app.get('/favicon.ico', (req, res) => res.status(204).end());
+
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',

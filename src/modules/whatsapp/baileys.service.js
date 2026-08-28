@@ -1,9 +1,3 @@
-const {
-  default: makeWASocket,
-  DisconnectReason,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const pino = require('pino');
 const path = require('path');
@@ -11,7 +5,18 @@ const fs = require('fs');
 const db = require('../../config/db');
 const { emitEvent } = require('../../config/socket');
 
-const AUTH_DIR = path.join(__dirname, '../../../whatsapp_auth_session');
+// Baileys is an ESM module; dynamically load it on demand
+let baileysModule = null;
+async function getBaileys() {
+  if (!baileysModule) {
+    baileysModule = await import('@whiskeysockets/baileys');
+  }
+  return baileysModule;
+}
+
+const AUTH_DIR = (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME)
+  ? path.join('/tmp', 'whatsapp_auth_session')
+  : path.join(__dirname, '../../../whatsapp_auth_session');
 
 class BaileysService {
   constructor() {
@@ -43,6 +48,10 @@ class BaileysService {
 
     this.isConnecting = true;
     try {
+      const baileys = await getBaileys();
+      const makeWASocket = baileys.default?.default || baileys.default || baileys.makeWASocket;
+      const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } = baileys;
+
       if (!fs.existsSync(AUTH_DIR)) {
         fs.mkdirSync(AUTH_DIR, { recursive: true });
       }
