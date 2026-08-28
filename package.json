@@ -1,0 +1,25 @@
+{
+  "name": "retail-repair-backend",
+  "version": "1.0.0",
+  "description": "Production REST API for Retail & Repair Management System",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node seeds/seedRealisticData.js"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1",
+    "pino": "^10.3.1",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.1"
+  }
+}
