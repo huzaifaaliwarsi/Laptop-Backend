@@ -1,16 +1,8 @@
 const fs = require('fs');
 const path = require('path');
-const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const { pool } = require('../src/config/db');
 
-const pool = new Pool({
-  host: process.env.DB_HOST || '127.0.0.1',
-  port: parseInt(process.env.DB_PORT || '5432', 10),
-  database: process.env.DB_NAME || 'retail_repair_db',
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || 'admin123',
-});
 
 async function runSeed() {
   const client = await pool.connect();
