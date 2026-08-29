@@ -50,7 +50,7 @@ router.get('/product', async (req, res, next) => {
       SELECT pc.id, pc.name, pc.code_prefix, pc.is_system, pc.created_at,
              COUNT(p.id)::int AS product_count
       FROM product_categories pc
-      LEFT JOIN products p ON p.category_id = pc.id
+      LEFT JOIN products p ON (p.category_id = pc.id OR LOWER(p.category_name) = LOWER(pc.name))
       GROUP BY pc.id, pc.name, pc.code_prefix, pc.is_system, pc.created_at
       ORDER BY pc.id ASC
     `);
@@ -170,16 +170,12 @@ router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req
     }
 
     const category = catRes.rows[0];
-    if (category.is_system) {
-      return res.status(400).json({
-        success: false,
-        code: 'SYSTEM_CATEGORY',
-        message: `System default category "${category.name}" cannot be deleted.`
-      });
-    }
 
-    // Check if category is used in products
-    const inUse = await db.query('SELECT COUNT(*)::int as count FROM products WHERE category_id = $1', [id]);
+    // Check if category is used in products (by category_id or category_name)
+    const inUse = await db.query(
+      'SELECT COUNT(*)::int as count FROM products WHERE category_id = $1 OR LOWER(category_name) = LOWER($2)',
+      [id, category.name]
+    );
     const count = inUse.rows[0].count;
     if (count > 0) {
       return res.status(400).json({
@@ -190,7 +186,7 @@ router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req
     }
 
     await db.query('DELETE FROM product_categories WHERE id = $1', [id]);
-    emitEvent('categories.product_deleted', { id: parseInt(id, 10) });
+    emitEvent('categories.product_deleted', { id: parseInt(id, 10), name: category.name });
 
     return res.json({
       success: true,
