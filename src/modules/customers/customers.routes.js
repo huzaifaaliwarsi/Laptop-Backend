@@ -5,11 +5,12 @@ const authenticateToken = require('../../middleware/auth');
 const { requireSalesOrAdmin, requireAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
 const { emitEvent } = require('../../config/socket');
+const { CacheService, cacheRoute } = require('../../config/cache');
 
 router.use(authenticateToken);
 
-// GET /api/customers - List all customers with receivable/payable balance calculation
-router.get('/', requireSalesOrAdmin, async (req, res, next) => {
+// GET /api/customers - List all customers with receivable/payable balance calculation (Cached 60s)
+router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { search, balance } = req.query;
     let whereClause = '';
@@ -107,6 +108,7 @@ router.post('/', requireSalesOrAdmin, async (req, res, next) => {
       [customerId, cleanName, cleanContact, cleanAddress, cleanNotes]
     );
 
+    await CacheService.invalidatePattern('route:/api/customers*');
     emitEvent('customers.created', insertRes.rows[0]);
 
     return res.status(201).json({
@@ -158,6 +160,7 @@ router.put('/:id', requireSalesOrAdmin, async (req, res, next) => {
       return updateRes.rows[0];
     });
 
+    await CacheService.invalidatePattern('route:/api/customers*');
     emitEvent('customers.updated', result);
 
     return res.json({
@@ -189,6 +192,7 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     }
 
     await db.query('DELETE FROM customers WHERE id = $1', [id]);
+    await CacheService.invalidatePattern('route:/api/customers*');
     emitEvent('customers.deleted', { id });
 
     return res.json({

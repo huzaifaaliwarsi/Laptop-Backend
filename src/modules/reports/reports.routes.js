@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin } = require('../../middleware/rbac');
+const { CacheService, cacheRoute } = require('../../config/cache');
 
 router.use(authenticateToken);
 
@@ -21,8 +22,8 @@ function applyDateFilter(queryText, params, from, to, dateCol = 'date') {
   return queryText;
 }
 
-// GET /api/reports/dashboard - Dynamic Dashboard Metrics
-router.get('/dashboard', async (req, res, next) => {
+// GET /api/reports/dashboard - Dynamic Dashboard Metrics (Cached 30s)
+router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
   try {
     const role = req.user.role;
     const userId = req.user.id;

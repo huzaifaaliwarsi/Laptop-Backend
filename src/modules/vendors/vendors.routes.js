@@ -5,11 +5,12 @@ const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
 const { emitEvent } = require('../../config/socket');
+const { CacheService, cacheRoute } = require('../../config/cache');
 
 router.use(authenticateToken);
 
-// GET /api/vendors - List all vendors with payable/receivable balance calculation
-router.get('/', requireSalesOrAdmin, async (req, res, next) => {
+// GET /api/vendors - List all vendors with payable/receivable balance calculation (Cached 60s)
+router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { search } = req.query;
     let whereClause = '';
@@ -96,6 +97,7 @@ router.post('/', requireSalesOrAdmin, async (req, res, next) => {
       [vendorId, cleanName, cleanContact, cleanAddress, cleanNotes]
     );
 
+    await CacheService.invalidatePattern('route:/api/vendors*');
     emitEvent('vendors.created', insertRes.rows[0]);
 
     return res.status(201).json({
@@ -147,6 +149,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       return updateRes.rows[0];
     });
 
+    await CacheService.invalidatePattern('route:/api/vendors*');
     emitEvent('vendors.updated', result);
 
     return res.json({
@@ -177,6 +180,7 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     }
 
     await db.query('DELETE FROM vendors WHERE id = $1', [id]);
+    await CacheService.invalidatePattern('route:/api/vendors*');
     emitEvent('vendors.deleted', { id });
 
     return res.json({

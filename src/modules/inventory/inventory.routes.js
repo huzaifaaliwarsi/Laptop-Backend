@@ -4,11 +4,12 @@ const db = require('../../config/db');
 const InventoryService = require('./inventory.service');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
+const { CacheService, cacheRoute } = require('../../config/cache');
 
 router.use(authenticateToken);
 
-// GET /api/products - List products with multi-filter and stock status
-router.get('/', async (req, res, next) => {
+// GET /api/products - List products with multi-filter and stock status (Cached 60s)
+router.get('/', cacheRoute(60), async (req, res, next) => {
   try {
     const products = await InventoryService.getProducts(req.query, req.user.role);
     return res.json({
@@ -20,8 +21,8 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// GET /api/products/ledger - Inventory movement history
-router.get('/ledger', async (req, res, next) => {
+// GET /api/products/ledger - Inventory movement history (Cached 60s)
+router.get('/ledger', cacheRoute(60), async (req, res, next) => {
   try {
     const query = `
       SELECT m.*, u.name as performed_by_name
@@ -53,8 +54,8 @@ router.get('/ledger', async (req, res, next) => {
   }
 });
 
-// GET /api/products/:id/history - Product stock movement history
-router.get('/:id/history', async (req, res, next) => {
+// GET /api/products/:id/history - Product stock movement history (Cached 60s)
+router.get('/:id/history', cacheRoute(60), async (req, res, next) => {
   try {
     const result = await InventoryService.getProductById(req.params.id, req.user.role);
     if (!result) {
@@ -83,8 +84,8 @@ router.get('/:id/history', async (req, res, next) => {
   }
 });
 
-// GET /api/products/:id - Product detail + movements
-router.get('/:id', async (req, res, next) => {
+// GET /api/products/:id - Product detail + movements (Cached 60s)
+router.get('/:id', cacheRoute(60), async (req, res, next) => {
   try {
     const result = await InventoryService.getProductById(req.params.id, req.user.role);
     if (!result) {
@@ -276,6 +277,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
       return productResult;
     });
+
+    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidatePattern('route:/api/categories*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
 
     return res.status(201).json({
       success: true,
@@ -635,6 +640,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       return updatedProduct;
     });
 
+    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidatePattern('route:/api/categories*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/vendors*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
+
     return res.json({
       success: true,
       message: 'Product and vendor ledger updated successfully',
@@ -684,6 +695,11 @@ router.post('/:id/adjust', requireAdmin, async (req, res, next) => {
       }, client);
     });
 
+    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/vendors*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
+
     return res.json({
       success: true,
       message: 'Stock adjusted successfully',
@@ -732,6 +748,11 @@ router.post('/adjustments', requireAdmin, async (req, res, next) => {
       }, client);
     });
 
+    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/vendors*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
+
     return res.json({
       success: true,
       message: 'Stock adjustment applied successfully',
@@ -772,6 +793,10 @@ router.post('/bulk-csv', requireAdmin, async (req, res, next) => {
       }
     });
 
+    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidatePattern('route:/api/categories*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+
     return res.json({
       success: true,
       message: `${imported.length} product row(s) imported successfully`,
@@ -807,6 +832,10 @@ router.delete('/:id', requireSalesOrAdmin, async (req, res, next) => {
       // 3. Delete the product
       await client.query('DELETE FROM products WHERE id = $1', [id]);
     });
+
+    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidatePattern('route:/api/categories*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
 
     emitEvent('products.deleted', { id, code: product.code });
 

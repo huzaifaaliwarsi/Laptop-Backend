@@ -4,9 +4,10 @@ const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin } = require('../../middleware/rbac');
 const { emitEvent } = require('../../config/socket');
+const { CacheService, cacheRoute } = require('../../config/cache');
 
-// GET /api/settings/company - Public or any authenticated user (used for sidebar, header, invoice)
-router.get('/company', async (req, res, next) => {
+// GET /api/settings/company - Public or any authenticated user (Cached 600s)
+router.get('/company', cacheRoute(600), async (req, res, next) => {
   try {
     const result = await db.query(`
       SELECT id, company_name, tagline, invoice_subtitle, phone, email, tax_number, address, invoice_footer, logo_data, ntn, strn, pos_id, fbr_pos_id, updated_at
@@ -97,6 +98,7 @@ router.put('/company', authenticateToken, requireAdmin, async (req, res, next) =
       logoData || null
     ]);
 
+    await CacheService.invalidatePattern('route:/api/settings*');
     emitEvent('settings.company_updated', updateRes.rows[0]);
 
     return res.json({

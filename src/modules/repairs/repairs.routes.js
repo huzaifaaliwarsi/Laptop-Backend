@@ -4,11 +4,12 @@ const db = require('../../config/db');
 const RepairService = require('./repairs.service');
 const authenticateToken = require('../../middleware/auth');
 const { requireSalesOrAdmin, requireTechnicianOrAdmin } = require('../../middleware/rbac');
+const { CacheService, cacheRoute } = require('../../config/cache');
 
 router.use(authenticateToken);
 
-// GET /api/repairs - List repair jobs
-router.get('/', async (req, res, next) => {
+// GET /api/repairs - List repair jobs (Cached 60s)
+router.get('/', cacheRoute(60), async (req, res, next) => {
   try {
     const { search, status, technicianId, customerId, jobType, categoryId, from, to } = req.query;
     let queryText = 'SELECT * FROM repair_jobs WHERE 1=1';
@@ -117,8 +118,8 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// GET /api/repairs/:id - Full job card details
-router.get('/:id', async (req, res, next) => {
+// GET /api/repairs/:id - Full job card details (Cached 60s)
+router.get('/:id', cacheRoute(60), async (req, res, next) => {
   try {
     const jobDetails = await RepairService.getJobDetails(req.params.id, req.user.role);
     if (!jobDetails) {
@@ -151,6 +152,10 @@ router.get('/:id', async (req, res, next) => {
 router.post('/', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.createJob(req.body, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/customers*');
+
     return res.status(201).json({
       success: true,
       message: 'Repair job created successfully',
@@ -165,6 +170,9 @@ router.post('/', requireSalesOrAdmin, async (req, res, next) => {
 router.put('/:id/technical-update', requireTechnicianOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.technicalUpdate(req.params.id, req.body, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+
     return res.json({
       success: true,
       message: 'Technical update saved successfully',
@@ -222,6 +230,9 @@ router.put('/:id/admin-update', requireSalesOrAdmin, async (req, res, next) => {
       return updateRes.rows[0];
     });
 
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+
     return res.json({
       success: true,
       message: 'Repair job updated successfully',
@@ -236,6 +247,9 @@ router.put('/:id/admin-update', requireSalesOrAdmin, async (req, res, next) => {
 router.post('/:id/approve', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.approveQuote(req.params.id, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+
     return res.json({
       success: true,
       message: 'Quotation approved and repair started',
@@ -250,6 +264,9 @@ router.post('/:id/approve', requireSalesOrAdmin, async (req, res, next) => {
 router.post('/:id/decline', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.declineQuote(req.params.id, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+
     return res.json({
       success: true,
       message: 'Quotation declined',
@@ -264,6 +281,10 @@ router.post('/:id/decline', requireSalesOrAdmin, async (req, res, next) => {
 router.post('/:id/collect-payment', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.collectPayment(req.params.id, req.body, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
+
     return res.json({
       success: true,
       message: 'Payment collected successfully',
@@ -278,6 +299,10 @@ router.post('/:id/collect-payment', requireSalesOrAdmin, async (req, res, next) 
 router.post('/:id/deliver', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.payAndDeliver(req.params.id, req.body, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
+
     return res.json({
       success: true,
       message: 'Product delivered and repair closed',
@@ -292,6 +317,10 @@ router.post('/:id/deliver', requireSalesOrAdmin, async (req, res, next) => {
 router.post('/:id/parts', async (req, res, next) => {
   try {
     const result = await RepairService.addUsedPart(req.params.id, req.body, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+
     return res.json({
       success: true,
       message: 'Spare part issued successfully',
@@ -306,6 +335,9 @@ router.post('/:id/parts', async (req, res, next) => {
 router.put('/:id/parts/:partUsedId', async (req, res, next) => {
   try {
     const result = await RepairService.updateUsedPart(req.params.id, req.params.partUsedId, req.body, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/products*');
+
     return res.json({
       success: true,
       message: 'Issued spare part updated successfully',
@@ -320,6 +352,10 @@ router.put('/:id/parts/:partUsedId', async (req, res, next) => {
 router.delete('/:id/parts/:partUsedId', async (req, res, next) => {
   try {
     const result = await RepairService.removeUsedPart(req.params.id, req.params.partUsedId, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+
     return res.json({
       success: true,
       message: 'Spare part removed and stock restored to inventory',

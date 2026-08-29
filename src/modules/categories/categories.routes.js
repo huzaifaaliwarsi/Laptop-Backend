@@ -4,16 +4,17 @@ const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
 const { emitEvent } = require('../../config/socket');
+const { CacheService, cacheRoute } = require('../../config/cache');
 
-// GET /api/categories - All categories aggregated
-router.get('/', async (req, res, next) => {
+// GET /api/categories - All categories aggregated (Cached 300s)
+router.get('/', cacheRoute(300), async (req, res, next) => {
   try {
     const [prodRes, expRes, accRes, repRes] = await Promise.all([
       db.query(`
         SELECT pc.id, pc.name, pc.code_prefix, pc.is_system, pc.created_at,
                COUNT(p.id)::int AS product_count
         FROM product_categories pc
-        LEFT JOIN products p ON p.category_id = pc.id
+        LEFT JOIN products p ON (p.category_id = pc.id OR LOWER(p.category_name) = LOWER(pc.name))
         GROUP BY pc.id, pc.name, pc.code_prefix, pc.is_system, pc.created_at
         ORDER BY pc.id ASC
       `),
@@ -93,6 +94,7 @@ router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res,
     );
 
     const newCategory = { ...insertRes.rows[0], product_count: 0 };
+    await CacheService.invalidatePattern('route:/api/categories*');
     emitEvent('categories.product_added', newCategory);
 
     return res.status(201).json({
@@ -145,6 +147,8 @@ router.put('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, r
     // Update category_name in products table
     await db.query('UPDATE products SET category_name = $1 WHERE category_id = $2', [cleanName, id]);
 
+    await CacheService.invalidatePattern('route:/api/categories*');
+    await CacheService.invalidatePattern('route:/api/products*');
     emitEvent('categories.product_updated', updated.rows[0]);
 
     return res.json({
@@ -186,6 +190,7 @@ router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req
     }
 
     await db.query('DELETE FROM product_categories WHERE id = $1', [id]);
+    await CacheService.invalidatePattern('route:/api/categories*');
     emitEvent('categories.product_deleted', { id: parseInt(id, 10), name: category.name });
 
     return res.json({
