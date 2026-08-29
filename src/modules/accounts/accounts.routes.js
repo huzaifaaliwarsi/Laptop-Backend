@@ -4,10 +4,27 @@ const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
-const { validateOutflow } = require('../../utils/financialFormulas');
+const { getAvailableBalance, validateOutflow } = require('../../utils/financialFormulas');
 const { emitEvent } = require('../../config/socket');
 
 router.use(authenticateToken);
+
+// GET /api/accounts/drawer-balance - Current Available Cash & Online Drawer Balances
+router.get('/drawer-balance', requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const cash = await getAvailableBalance('Cash');
+    const online = await getAvailableBalance('Online');
+    return res.json({
+      success: true,
+      data: {
+        cash: parseFloat(cash || 0),
+        online: parseFloat(online || 0)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // GET /api/accounts - Filtered receivables & payables
 router.get('/', requireSalesOrAdmin, async (req, res, next) => {
