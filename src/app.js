@@ -21,8 +21,16 @@ const whatsappRoutes = require('./modules/whatsapp/whatsapp.routes');
 
 const app = express();
 
-// Hybrid CORS: Allow localhost, local network, Vercel preview/production URLs, and configured CORS_ORIGIN
-app.use(cors({
+// Allowed Origins Whitelist (Local + Deployed Frontend)
+const allowedOriginsList = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001',
+  'https://laptop-frontend-nine.vercel.app'
+];
+
+const corsOptions = {
   origin: (origin, callback) => {
     // Allow server-to-server, mobile, or requests without Origin header
     if (!origin) return callback(null, true);
@@ -30,18 +38,26 @@ app.use(cors({
     const isLocal = /^http:\/\/(localhost|127\.0\.0\.1)(:[0-9]+)?$/.test(origin) ||
                     /^http:\/\/192\.168\.[0-9]+\.[0-9]+(:[0-9]+)?$/.test(origin);
     const isVercel = /\.vercel\.app$/.test(origin);
+    const isWhitelisted = allowedOriginsList.some(item => origin.replace(/\/+$/, '') === item.replace(/\/+$/, ''));
     const isConfigured = process.env.CORS_ORIGIN && (
       process.env.CORS_ORIGIN === '*' ||
-      process.env.CORS_ORIGIN.split(',').map(s => s.trim()).includes(origin)
+      process.env.CORS_ORIGIN.split(',').map(s => s.trim().replace(/\/+$/, '')).includes(origin.replace(/\/+$/, ''))
     );
 
-    if (isLocal || isVercel || isConfigured || !process.env.CORS_ORIGIN) {
+    if (isLocal || isVercel || isWhitelisted || isConfigured || !process.env.CORS_ORIGIN) {
       return callback(null, true);
     }
-    return callback(null, true); // Permissive fallback for smooth deployment
+    return callback(null, true); // Permissive fallback for seamless deployment
   },
-  credentials: true
-}));
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  optionsSuccessStatus: 200
+};
+
+// Apply CORS & Handle preflight OPTIONS requests
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
