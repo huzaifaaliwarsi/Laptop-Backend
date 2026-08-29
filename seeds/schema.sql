@@ -62,6 +62,15 @@ CREATE TABLE accessory_categories (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE repair_categories (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) UNIQUE NOT NULL,
+    description TEXT,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE repair_services (
     id VARCHAR(50) PRIMARY KEY,
     code VARCHAR(50) UNIQUE NOT NULL,
@@ -327,6 +336,8 @@ CREATE TABLE repair_jobs (
     technician_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     technician_name VARCHAR(255),
     priority VARCHAR(50) DEFAULT 'Normal' CHECK (priority IN ('Normal', 'High', 'Urgent')),
+    category_id INT REFERENCES repair_categories(id) ON DELETE SET NULL,
+    category_name VARCHAR(100),
     product_type VARCHAR(100),
     brand VARCHAR(100),
     model VARCHAR(255),
@@ -366,22 +377,41 @@ CREATE INDEX idx_repair_jobs_tracking ON repair_jobs(tracking_id);
 CREATE INDEX idx_repair_jobs_technician ON repair_jobs(technician_id);
 CREATE INDEX idx_repair_jobs_status ON repair_jobs(status);
 CREATE INDEX idx_repair_jobs_customer ON repair_jobs(customer_id);
+CREATE INDEX idx_repair_jobs_category ON repair_jobs(category_id);
 
 CREATE TABLE repair_job_lines (
     id SERIAL PRIMARY KEY,
     repair_job_id VARCHAR(50) NOT NULL REFERENCES repair_jobs(id) ON DELETE CASCADE,
     service_id VARCHAR(50) REFERENCES repair_services(id) ON DELETE SET NULL,
     name VARCHAR(255) NOT NULL,
+    catalog_price_snapshot NUMERIC(18, 2),
     charges NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
+    quantity INT NOT NULL DEFAULT 1 CHECK (quantity > 0),
     duration VARCHAR(100),
     condition TEXT,
     is_approved_repair_line BOOLEAN DEFAULT FALSE
 );
 
+CREATE TABLE repair_parts (
+    id VARCHAR(50) PRIMARY KEY,
+    code VARCHAR(50) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    category VARCHAR(100) NOT NULL DEFAULT 'General',
+    compatible_models TEXT,
+    cost_price NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
+    selling_price NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
+    current_stock INT NOT NULL DEFAULT 0 CHECK (current_stock >= 0),
+    min_stock_alert INT NOT NULL DEFAULT 2,
+    status VARCHAR(50) NOT NULL DEFAULT 'Active' CHECK (status IN ('Active', 'Inactive')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE repair_parts_used (
     id SERIAL PRIMARY KEY,
     repair_job_id VARCHAR(50) NOT NULL REFERENCES repair_jobs(id) ON DELETE CASCADE,
-    product_id VARCHAR(50) NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+    part_id VARCHAR(50) REFERENCES repair_parts(id) ON DELETE SET NULL,
+    product_id VARCHAR(50) REFERENCES products(id) ON DELETE SET NULL,
     product_code VARCHAR(50) NOT NULL,
     name VARCHAR(255) NOT NULL,
     quantity INT NOT NULL DEFAULT 1 CHECK (quantity > 0),

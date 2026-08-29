@@ -192,7 +192,7 @@ router.get('/dashboard', async (req, res, next) => {
       `),
       // Recent Repair Jobs
       db.query(`
-        SELECT id, tracking_id, customer_name, contact as customer_contact, brand, model, status, priority, total, date, expected_completion
+        SELECT id, tracking_id, customer_name, contact as customer_contact, category_name as category, brand, model, status, priority, total, date, expected_completion
         FROM repair_jobs ORDER BY date DESC, created_at DESC LIMIT 6
       `),
       // Recent Expenses
@@ -500,6 +500,8 @@ router.get('/repairs', async (req, res, next) => {
         date: job.date,
         customerName: job.customer_name,
         jobType: job.job_type,
+        categoryId: job.category_id,
+        categoryName: job.category_name,
         technicianName: job.technician_name || 'Unassigned',
         status: job.status,
         priority: job.priority,

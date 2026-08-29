@@ -1,6 +1,12 @@
 const db = require('../../config/db');
-const { getNextProductCode, getNextEntityId } = require('../../utils/codeGenerator');
+const { getNextProductCode, getNextEntityId, getNextInvoiceNo } = require('../../utils/codeGenerator');
 const { emitEvent } = require('../../config/socket');
+
+function paymentStatus(total, paid) {
+  if (paid <= 0) return 'Unpaid';
+  if (paid >= total) return 'Paid';
+  return 'Partial';
+}
 
 function generateProductKey(p) {
   return [p.categoryName || p.category, p.brand, p.model, p.specifications || '']
@@ -248,8 +254,8 @@ class InventoryService {
 
     if (existingRes.rows.length > 0) {
       const existing = existingRes.rows[0];
-      const updatedStockIn = existing.stock_in + quantity;
-      const updatedCurrentStock = existing.current_stock + quantity;
+      const updatedStockIn = (parseInt(existing.stock_in, 10) || 0) + quantity;
+      const updatedCurrentStock = (parseInt(existing.current_stock, 10) || 0) + quantity;
 
       const updateRes = await client.query(
         `UPDATE products 
@@ -271,6 +277,13 @@ class InventoryService {
         ]
       );
 
+      // Validate user ID exists in DB to prevent foreign key error
+      let validUserId = null;
+      if (user?.id) {
+        const uRes = await client.query('SELECT id FROM users WHERE id = $1', [user.id]);
+        if (uRes.rows.length > 0) validUserId = uRes.rows[0].id;
+      }
+
       // Log inventory movement
       await client.query(
         `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date)
@@ -282,7 +295,7 @@ class InventoryService {
           sourceData.reason || 'Stock added to existing product',
           sourceData.refType || 'Stock In',
           sourceData.refId || 'MANUAL',
-          user?.id || null,
+          validUserId,
           sourceData.date || new Date()
         ]
       );
@@ -346,6 +359,13 @@ class InventoryService {
       ]
     );
 
+    // Validate user ID exists in DB to prevent foreign key error
+    let validUserId = null;
+    if (user?.id) {
+      const uRes = await client.query('SELECT id FROM users WHERE id = $1', [user.id]);
+      if (uRes.rows.length > 0) validUserId = uRes.rows[0].id;
+    }
+
     // Log movement
     await client.query(
       `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date)
@@ -357,7 +377,7 @@ class InventoryService {
         sourceData.reason || 'Initial stock added',
         sourceData.refType || 'Manual Entry',
         sourceData.refId || 'MANUAL',
-        user?.id || null,
+        validUserId,
         sourceData.date || new Date()
       ]
     );
@@ -370,7 +390,24 @@ class InventoryService {
     };
   }
 
-  static async adjustStock({ productId, direction, quantity, reason, refType, refId, date, user }, client = db) {
+  static async adjustStock({
+    productId,
+    direction,
+    quantity,
+    reason,
+    refType,
+    refId,
+    date,
+    user,
+    vendorId,
+    vendorName,
+    vendorContact,
+    costPrice,
+    purchaseInvoiceNo,
+    paid,
+    paymentMethod = 'Cash',
+    referenceId = null
+  }, client = db) {
     const qty = parseInt(quantity, 10);
     if (isNaN(qty) || qty <= 0) {
       const error = new Error('Quantity must be greater than zero.');
@@ -387,16 +424,17 @@ class InventoryService {
 
     const product = prodRes.rows[0];
 
-    if (direction === 'OUT' && qty > product.current_stock) {
-      const error = new Error(`Insufficient stock. Only ${product.current_stock} item(s) available for ${product.code}.`);
+    const curStock = parseInt(product.current_stock, 10) || 0;
+    if (direction === 'OUT' && qty > curStock) {
+      const error = new Error(`Insufficient stock. Only ${curStock} item(s) available for ${product.code}.`);
       error.status = 400;
       error.code = 'INSUFFICIENT_STOCK';
       throw error;
     }
 
-    let updatedStockIn = product.stock_in;
-    let updatedStockOut = product.stock_out;
-    let updatedCurrentStock = product.current_stock;
+    let updatedStockIn = parseInt(product.stock_in, 10) || 0;
+    let updatedStockOut = parseInt(product.stock_out, 10) || 0;
+    let updatedCurrentStock = curStock;
 
     if (direction === 'IN') {
       updatedStockIn += qty;
@@ -406,14 +444,147 @@ class InventoryService {
       updatedCurrentStock -= qty;
     }
 
+    // Cost price determination
+    const effectiveCostPrice = costPrice !== undefined && costPrice !== '' ? parseFloat(costPrice || 0) : parseFloat(product.cost_price || 0);
+
     const updateRes = await client.query(
       `UPDATE products 
-       SET stock_in = $1, stock_out = $2, current_stock = $3, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $4
+       SET stock_in = $1, stock_out = $2, current_stock = $3,
+           cost_price = CASE WHEN $4::numeric > 0 THEN $4 ELSE cost_price END,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5
        RETURNING *`,
-      [updatedStockIn, updatedStockOut, updatedCurrentStock, productId]
+      [updatedStockIn, updatedStockOut, updatedCurrentStock, effectiveCostPrice, productId]
     );
 
+    // Validate user ID exists in DB
+    let validUserId = null;
+    if (user?.id) {
+      const uRes = await client.query('SELECT id FROM users WHERE id = $1', [user.id]);
+      if (uRes.rows.length > 0) validUserId = uRes.rows[0].id;
+    }
+
+    let finalRefType = refType || `Manual ${direction} Adjustment`;
+    let finalRefId = refId || 'MANUAL';
+    const adjDate = date || new Date();
+
+    // 1. Check if Vendor Ledger should be created (when Stock IN from vendor)
+    let vId = vendorId;
+    let vName = vendorName;
+    const hasVendor = (vId && vId !== 'MANUAL') || (vName && vName.trim() !== '' && vName !== 'Manual Entry');
+
+    if (direction === 'IN' && hasVendor) {
+      // Resolve vendor ID / Name
+      if (vId && (!vName || vName === 'Manual Entry')) {
+        const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE id = $1', [vId]);
+        if (vRes.rows.length > 0) {
+          vName = vRes.rows[0].name;
+          if (!vendorContact) vendorContact = vRes.rows[0].contact;
+        }
+      } else if (vName && (!vId || vId === 'MANUAL')) {
+        const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE LOWER(name) = LOWER($1)', [vName.trim()]);
+        if (vRes.rows.length > 0) {
+          vId = vRes.rows[0].id;
+          vName = vRes.rows[0].name;
+          if (!vendorContact) vendorContact = vRes.rows[0].contact;
+        } else {
+          vId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
+          await client.query('INSERT INTO vendors (id, name, contact) VALUES ($1, $2, $3)', [
+            vId, vName.trim(), vendorContact || null
+          ]);
+        }
+      }
+
+      const totalCost = qty * effectiveCostPrice;
+
+      if (totalCost > 0) {
+        const paidAmount = paid === undefined || paid === ''
+          ? totalCost
+          : Math.min(Math.max(0, parseFloat(paid || 0)), totalCost);
+        const balance = Math.max(0, totalCost - paidAmount);
+        const pStatus = paymentStatus(totalCost, paidAmount);
+
+        let candidateInvNo = purchaseInvoiceNo && purchaseInvoiceNo !== 'MANUAL'
+          ? purchaseInvoiceNo
+          : await getNextInvoiceNo('vendor_purchase', client);
+
+        const invExistsCheck = await client.query('SELECT 1 FROM invoices WHERE invoice_no = $1', [candidateInvNo]);
+        if (invExistsCheck.rows.length > 0) {
+          candidateInvNo = await getNextInvoiceNo('vendor_purchase', client);
+        }
+
+        const targetInvoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
+        const targetInvoiceNo = candidateInvNo;
+
+        const invRes = await client.query(
+          `INSERT INTO invoices (
+            id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
+            product_total, service_total, total, paid, initial_paid, balance, payment_method,
+            reference_id, payment_status, is_voided, created_by, created_by_name
+          ) VALUES (
+            $1, $2, 'Vendor Purchase', 'vendor_purchase', $3, 'Vendor', $4, $5, $6,
+            $7, 0, $7, $8, $8, $9, $10,
+            $11, $12, FALSE, $13, $14
+          ) RETURNING *`,
+          [
+            targetInvoiceId, targetInvoiceNo, adjDate, vId, vName, vendorContact,
+            totalCost, paidAmount, balance, paymentMethod,
+            referenceId, pStatus, validUserId, user?.name || 'Admin'
+          ]
+        );
+
+        await client.query(
+          `INSERT INTO invoice_items (
+            invoice_id, item_type, product_id, code, name, description, quantity,
+            unit_price, cost_price_snapshot, line_total
+          ) VALUES ($1, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            targetInvoiceId, productId, product.code,
+            `${product.brand} ${product.model}`.trim(),
+            `Stock Adjustment (${reason || 'Stock Refill'}) — ${product.category_name} ${product.brand} ${product.model}`,
+            qty, effectiveCostPrice, effectiveCostPrice, totalCost
+          ]
+        );
+
+        if (paidAmount > 0) {
+          const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
+          await client.query(
+            `INSERT INTO payments (
+              id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+              direction, amount, date, payment_method, reference_id, notes, affects_money,
+              is_initial_settlement, created_by, created_by_name
+            ) VALUES (
+              $1, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
+              'Paid', $6, $7, $8, $9, $10, TRUE,
+              TRUE, $11, $12
+            )`,
+            [
+              payId, targetInvoiceId, targetInvoiceNo, vId, vName,
+              paidAmount, adjDate, paymentMethod, referenceId, `Stock Adjustment Payment (${product.code})`,
+              validUserId, user?.name || 'Admin'
+            ]
+          );
+        }
+
+        if (balance > 0) {
+          const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
+          await client.query(
+            `INSERT INTO accounts (
+              id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+              amount, remaining, status, date
+            ) VALUES ($1, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
+            [accId, vId, vName, targetInvoiceId, targetInvoiceNo, balance, balance, adjDate]
+          );
+        }
+
+        finalRefType = 'Vendor Purchase';
+        finalRefId = targetInvoiceNo;
+
+        emitEvent('invoice.created', invRes.rows[0]);
+      }
+    }
+
+    // 2. Movement logging
     await client.query(
       `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -423,16 +594,20 @@ class InventoryService {
         direction,
         qty,
         reason || `Manual ${direction} adjustment`,
-        refType || 'Manual Adjustment',
-        refId || 'MANUAL',
-        user?.id || null,
-        date || new Date()
+        finalRefType,
+        finalRefId,
+        validUserId,
+        adjDate
       ]
     );
 
     emitEvent('inventory.updated', { productId, currentStock: updatedCurrentStock });
 
-    return updateRes.rows[0];
+    return {
+      product: updateRes.rows[0],
+      newStock: updatedCurrentStock,
+      invoiceNo: finalRefId !== 'MANUAL' ? finalRefId : null
+    };
   }
 }
 

@@ -10,7 +10,7 @@ router.use(authenticateToken);
 // GET /api/repairs - List repair jobs
 router.get('/', async (req, res, next) => {
   try {
-    const { search, status, technicianId, customerId, jobType, from, to } = req.query;
+    const { search, status, technicianId, customerId, jobType, categoryId, from, to } = req.query;
     let queryText = 'SELECT * FROM repair_jobs WHERE 1=1';
     const params = [];
 
@@ -31,6 +31,11 @@ router.get('/', async (req, res, next) => {
     if (jobType) {
       params.push(jobType);
       queryText += ` AND job_type = $${params.length}`;
+    }
+
+    if (categoryId) {
+      params.push(categoryId);
+      queryText += ` AND category_id = $${params.length}`;
     }
 
     if (status) {
@@ -54,6 +59,7 @@ router.get('/', async (req, res, next) => {
         LOWER(tracking_id) LIKE $${params.length} OR
         LOWER(customer_name) LIKE $${params.length} OR
         LOWER(contact) LIKE $${params.length} OR
+        LOWER(COALESCE(category_name, '')) LIKE $${params.length} OR
         LOWER(COALESCE(brand, '')) LIKE $${params.length} OR
         LOWER(COALESCE(model, '')) LIKE $${params.length} OR
         LOWER(problem) LIKE $${params.length}
@@ -79,6 +85,8 @@ router.get('/', async (req, res, next) => {
         technicianId: job.technician_id,
         technicianName: job.technician_name || 'Unassigned',
         priority: job.priority,
+        categoryId: job.category_id,
+        categoryName: job.category_name,
         productType: job.product_type,
         brand: job.brand,
         model: job.model,
@@ -273,6 +281,48 @@ router.post('/:id/deliver', requireSalesOrAdmin, async (req, res, next) => {
     return res.json({
       success: true,
       message: 'Product delivered and repair closed',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/repairs/:id/parts - Issue a spare part to repair job
+router.post('/:id/parts', async (req, res, next) => {
+  try {
+    const result = await RepairService.addUsedPart(req.params.id, req.body, req.user);
+    return res.json({
+      success: true,
+      message: 'Spare part issued successfully',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /api/repairs/:id/parts/:partUsedId - Update an issued spare part
+router.put('/:id/parts/:partUsedId', async (req, res, next) => {
+  try {
+    const result = await RepairService.updateUsedPart(req.params.id, req.params.partUsedId, req.body, req.user);
+    return res.json({
+      success: true,
+      message: 'Issued spare part updated successfully',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/repairs/:id/parts/:partUsedId - Remove an issued spare part and restore stock
+router.delete('/:id/parts/:partUsedId', async (req, res, next) => {
+  try {
+    const result = await RepairService.removeUsedPart(req.params.id, req.params.partUsedId, req.user);
+    return res.json({
+      success: true,
+      message: 'Spare part removed and stock restored to inventory',
       data: result
     });
   } catch (error) {

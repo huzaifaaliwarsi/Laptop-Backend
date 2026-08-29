@@ -44,9 +44,9 @@ class RepairService {
     if (isDiagOrigin && isApproved && adjustDiagnosisFee) {
       // Diagnosis fee waived / adjusted into approved repair
       const nonDiagLines = linesRes.rows.filter(l => l.line_type !== 'diagnosis');
-      serviceTotal = nonDiagLines.reduce((sum, line) => sum + parseFloat(line.charges || 0), 0) + parseFloat(job.extra_charges || 0);
+      serviceTotal = nonDiagLines.reduce((sum, line) => sum + (parseFloat(line.charges || 0) * parseInt(line.quantity || 1, 10)), 0) + parseFloat(job.extra_charges || 0);
     } else {
-      serviceTotal = linesRes.rows.reduce((sum, line) => sum + parseFloat(line.charges || 0), 0) + parseFloat(job.extra_charges || 0);
+      serviceTotal = linesRes.rows.reduce((sum, line) => sum + (parseFloat(line.charges || 0) * parseInt(line.quantity || 1, 10)), 0) + parseFloat(job.extra_charges || 0);
     }
 
     const partsTotal = partsRes.rows.reduce((sum, part) => sum + (parseInt(part.quantity || 1, 10) * parseFloat(part.customer_charge || 0)), 0);
@@ -113,11 +113,14 @@ class RepairService {
       if (line.line_type === 'diagnosis') lineDesc = `Inspection & Diagnosis: ${line.name}`;
       if (line.line_type === 'approved_repair') lineDesc = `Approved Repair: ${line.name}`;
 
-      const charge = parseFloat(line.charges || 0);
+      const unitCharge = parseFloat(line.charges || 0);
+      const qty = parseInt(line.quantity || 1, 10);
+      const lineTotal = unitCharge * qty;
+
       await client.query(
         `INSERT INTO invoice_items (invoice_id, item_type, service_id, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
-         VALUES ($1, 'service', $2, $3, $4, $5, 1, $6, 0.00, $7)`,
-        [invoiceId, line.service_id, line.service_id || (line.line_type === 'diagnosis' ? 'DIAG' : 'SERVICE'), line.name, lineDesc, charge, charge]
+         VALUES ($1, 'service', $2, $3, $4, $5, $6, $7, 0.00, $8)`,
+        [invoiceId, line.service_id, line.service_id || (line.line_type === 'diagnosis' ? 'DIAG' : 'SERVICE'), line.name, lineDesc, qty, unitCharge, lineTotal]
       );
     }
 
@@ -238,7 +241,7 @@ class RepairService {
     return await db.withTransaction(async (client) => {
       const {
         jobType, technicianId, priority, date, expectedCompletion, customerName, contact,
-        productType, brand, model, serial, problem, lines, extraEnabled, extraCharges,
+        categoryId, categoryName: reqCatName, productType, brand, model, serial, problem, lines, extraEnabled, extraCharges,
         extraReason, paid: reqPaid, paymentMethod, paymentReference, remarks, duration,
         // Diagnosis specific fields
         diagnosisServiceId, diagnosisServiceName, diagnosisFee, diagnosisDuration
@@ -250,6 +253,21 @@ class RepairService {
         throw error;
       }
 
+      // 1. Validate Category (Required for both Service Job and Diagnosis Job)
+      if (!categoryId) {
+        const error = new Error('Repair Category is required.');
+        error.status = 400;
+        throw error;
+      }
+
+      const catRes = await client.query('SELECT id, name FROM repair_categories WHERE id = $1', [categoryId]);
+      if (catRes.rows.length === 0) {
+        const error = new Error('Selected repair category does not exist in the database.');
+        error.status = 400;
+        throw error;
+      }
+      const categoryName = catRes.rows[0].name;
+
       const isDiag = jobType === 'Diagnosis Job';
       let cleanLines = [];
       let total = 0;
@@ -258,21 +276,33 @@ class RepairService {
 
       if (isDiag) {
         // Diagnosis Intake
-        if (diagnosisFee !== undefined && diagnosisFee !== null && diagnosisFee !== '') {
-          diagFee = parseFloat(diagnosisFee);
-        } else if (diagnosisServiceId) {
+        let catalogDiagPrice = 1000.00;
+        if (diagnosisServiceId) {
           const srvRes = await client.query('SELECT charges, name, duration FROM repair_services WHERE id = $1', [diagnosisServiceId]);
           if (srvRes.rows.length > 0) {
-            diagFee = parseFloat(srvRes.rows[0].charges || 0);
+            catalogDiagPrice = parseFloat(srvRes.rows[0].charges || 0);
           }
         }
-        if (isNaN(diagFee) || diagFee < 0) diagFee = 0;
+
+        if (diagnosisFee !== undefined && diagnosisFee !== null && diagnosisFee !== '') {
+          diagFee = parseFloat(diagnosisFee);
+        } else {
+          diagFee = catalogDiagPrice;
+        }
+
+        if (isNaN(diagFee) || diagFee < 0) {
+          const error = new Error('Diagnosis fee must be a valid non-negative number.');
+          error.status = 400;
+          throw error;
+        }
 
         total = diagFee;
         cleanLines = [{
           serviceId: diagnosisServiceId || null,
           name: diagnosisServiceName ? diagnosisServiceName.trim() : 'Standard Laptop Diagnosis & Inspection',
+          catalogPriceSnapshot: catalogDiagPrice,
           charges: diagFee,
+          quantity: 1,
           duration: diagnosisDuration ? diagnosisDuration.trim() : '1-2 Hours',
           condition: 'Initial fault inspection & diagnostic testing',
           lineType: 'diagnosis'
@@ -285,19 +315,51 @@ class RepairService {
           throw error;
         }
 
-        cleanLines = lines.map(l => ({
-          serviceId: l.serviceId || null,
-          name: (l.name || '').trim(),
-          charges: parseFloat(l.charges || 0),
-          duration: (l.duration || '').trim(),
-          condition: (l.condition || '').trim(),
-          lineType: 'repair'
-        }));
+        for (const l of lines) {
+          const lineName = (l.name || '').trim();
+          const unitCharge = parseFloat(l.charges !== undefined && l.charges !== null ? l.charges : (l.charge || 0));
+          const qty = parseInt(l.quantity || 1, 10);
+          let catalogPrice = l.catalogPriceSnapshot !== undefined ? parseFloat(l.catalogPriceSnapshot) : null;
 
-        if (cleanLines.some(l => !l.name || isNaN(l.charges) || l.charges < 0)) {
-          const error = new Error('All repair service lines must have a valid name and non-negative charges.');
-          error.status = 400;
-          throw error;
+          if (!lineName) {
+            const error = new Error('All repair service lines must have a valid service name.');
+            error.status = 400;
+            throw error;
+          }
+
+          if (isNaN(unitCharge) || unitCharge < 0) {
+            const error = new Error(`Invalid charged price for "${lineName}". Price must be a non-negative number.`);
+            error.status = 400;
+            throw error;
+          }
+
+          if (isNaN(qty) || qty <= 0) {
+            const error = new Error(`Invalid quantity for "${lineName}". Quantity must be at least 1.`);
+            error.status = 400;
+            throw error;
+          }
+
+          // If catalog service selected, obtain master catalog price snapshot
+          if (l.serviceId && catalogPrice === null) {
+            const srvRes = await client.query('SELECT charges FROM repair_services WHERE id = $1', [l.serviceId]);
+            if (srvRes.rows.length > 0) {
+              catalogPrice = parseFloat(srvRes.rows[0].charges || 0);
+            }
+          }
+          if (catalogPrice === null || isNaN(catalogPrice)) {
+            catalogPrice = unitCharge;
+          }
+
+          cleanLines.push({
+            serviceId: l.serviceId || null,
+            name: lineName,
+            catalogPriceSnapshot: catalogPrice,
+            charges: unitCharge,
+            quantity: qty,
+            duration: (l.duration || '').trim(),
+            condition: (l.condition || '').trim(),
+            lineType: 'repair'
+          });
         }
 
         extraAmt = extraEnabled === 'Yes' ? parseFloat(extraCharges || 0) : 0;
@@ -307,7 +369,7 @@ class RepairService {
           throw error;
         }
 
-        const linesTotal = cleanLines.reduce((sum, l) => sum + l.charges, 0);
+        const linesTotal = cleanLines.reduce((sum, l) => sum + (l.charges * l.quantity), 0);
         total = linesTotal + extraAmt;
       }
 
@@ -356,19 +418,19 @@ class RepairService {
       const jobRes = await client.query(
         `INSERT INTO repair_jobs (
           id, tracking_id, job_type, origin_job_type, date, customer_id, customer_name, contact,
-          technician_id, technician_name, priority, product_type, brand, model, serial, problem,
+          technician_id, technician_name, priority, category_id, category_name, product_type, brand, model, serial, problem,
           extra_charges, extra_reason, total, paid, initial_paid, payment_method, payment_reference,
           remarks, status, duration, expected_completion, diagnosis_fee, created_by, created_by_name
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8,
-          $9, $10, $11, $12, $13, $14, $15, $16,
-          $17, $18, $19, $20, $21, $22, $23,
-          $24, $25, $26, $27, $28, $29, $30
+          $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+          $19, $20, $21, $22, $23, $24, $25,
+          $26, $27, $28, $29, $30, $31, $32
         ) RETURNING *`,
         [
           repairId, trackingId, isDiag ? 'Diagnosis Job' : 'Service Job', isDiag ? 'Diagnosis Job' : 'Service Job', date || new Date(),
           customerId, cleanName, cleanContact, technicianId || null, techName, priority || 'Normal',
-          productType || null, brand || null, model || null, serial || null, problem.trim(),
+          categoryId, categoryName, productType || categoryName, brand || null, model || null, serial || null, problem.trim(),
           extraAmt, isDiag ? null : (extraReason ? extraReason.trim() : null), total, paid, paid, paymentMethod || 'Cash',
           paymentReference ? paymentReference.trim() : null, remarks ? remarks.trim() : null, initialStatus,
           isDiag ? (cleanLines[0]?.duration || '1-2 Hours') : (duration || null), expectedCompletion || null,
@@ -376,12 +438,12 @@ class RepairService {
         ]
       );
 
-      // Insert service lines
+      // Insert service lines with catalog snapshot, charges, and quantity
       for (const line of cleanLines) {
         await client.query(
-          `INSERT INTO repair_job_lines (repair_job_id, service_id, name, charges, duration, condition, line_type)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [repairId, line.serviceId || null, line.name, line.charges, line.duration || null, line.condition || null, line.lineType || 'repair']
+          `INSERT INTO repair_job_lines (repair_job_id, service_id, name, catalog_price_snapshot, charges, quantity, duration, condition, line_type)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [repairId, line.serviceId || null, line.name, line.catalogPriceSnapshot, line.charges, line.quantity, line.duration || null, line.condition || null, line.lineType || 'repair']
         );
       }
 
@@ -389,7 +451,7 @@ class RepairService {
       await client.query(
         `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
          VALUES ($1, $2, $3, $4, $5)`,
-        [repairId, initialStatus, isDiag ? `Diagnosis Job received and assigned to ${techName}` : `Service Job created and assigned to ${techName}`, user.id, user.name]
+        [repairId, initialStatus, isDiag ? `Diagnosis Job received for ${categoryName} and assigned to ${techName}` : `Service Job created for ${categoryName} and assigned to ${techName}`, user.id, user.name]
       );
 
       // If initial payment paid
@@ -475,7 +537,7 @@ class RepairService {
         }
       }
 
-      // If technician consumed a part
+      // If technician consumed a spare part
       if (partId && String(partId).trim() !== '') {
         if (isOriginalDiag && !isApproved) {
           const error = new Error('Spare parts cannot be issued or consumed before customer quotation approval.');
@@ -484,47 +546,86 @@ class RepairService {
         }
 
         const qty = parseInt(partQty || 1, 10);
-        const charge = parseFloat(partCharge || 0);
-
-        const prodRes = await client.query('SELECT * FROM products WHERE id = $1 FOR UPDATE', [partId]);
-        if (prodRes.rows.length === 0) {
-          const error = new Error('Selected replacement part not found.');
-          error.status = 404;
-          throw error;
-        }
-        const product = prodRes.rows[0];
-
-        if (qty <= 0 || qty > product.current_stock) {
-          const error = new Error(`Insufficient stock for ${product.code}. Available: ${product.current_stock}, Requested: ${qty}`);
+        if (isNaN(qty) || qty <= 0) {
+          const error = new Error('Issued spare part quantity must be at least 1.');
           error.status = 400;
-          error.code = 'INSUFFICIENT_STOCK';
           throw error;
         }
+        let charge = parseFloat(partCharge || 0);
+        if (isNaN(charge) || charge < 0) charge = 0;
 
-        // Deduct inventory stock
-        await InventoryService.adjustStock({
-          productId: product.id,
-          direction: 'OUT',
-          quantity: qty,
-          reason: `Repair part used — ${job.tracking_id}`,
-          refType: 'Repair Job',
-          refId: job.id,
-          date: new Date(),
-          user
-        }, client);
+        // 1. Check dedicated repair_parts first
+        const partRes = await client.query('SELECT * FROM repair_parts WHERE id = $1 FOR UPDATE', [partId]);
+        if (partRes.rows.length > 0) {
+          const part = partRes.rows[0];
+          if (qty > part.current_stock) {
+            const error = new Error(`Insufficient stock for spare part ${part.code} (${part.name}). Available: ${part.current_stock}, Requested: ${qty}`);
+            error.status = 400;
+            error.code = 'INSUFFICIENT_STOCK';
+            throw error;
+          }
 
-        // Record in repair_parts_used
-        await client.query(
-          `INSERT INTO repair_parts_used (
-            repair_job_id, product_id, product_code, name, quantity, customer_charge,
-            cost_price_snapshot, added_by, added_by_name
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [
-            job.id, product.id, product.code,
-            `${product.brand} ${product.model || product.product_name || ''}`.trim(),
-            qty, charge, parseFloat(product.cost_price || 0), user.id, user.name
-          ]
-        );
+          // Deduct repair_parts current_stock
+          await client.query(
+            'UPDATE repair_parts SET current_stock = current_stock - $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+            [qty, part.id]
+          );
+
+          if (charge === 0 && parseFloat(part.selling_price || 0) > 0) {
+            charge = parseFloat(part.selling_price || 0);
+          }
+
+          // Record in repair_parts_used
+          await client.query(
+            `INSERT INTO repair_parts_used (
+              repair_job_id, part_id, product_code, name, quantity, customer_charge,
+              cost_price_snapshot, added_by, added_by_name
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [
+              job.id, part.id, part.code,
+              part.name,
+              qty, charge, parseFloat(part.cost_price || 0), user.id, user.name
+            ]
+          );
+        } else {
+          // 2. Legacy fallback to products if matching product
+          const prodRes = await client.query('SELECT * FROM products WHERE id = $1 FOR UPDATE', [partId]);
+          if (prodRes.rows.length === 0) {
+            const error = new Error('Selected replacement spare part not found.');
+            error.status = 404;
+            throw error;
+          }
+          const product = prodRes.rows[0];
+          if (qty > product.current_stock) {
+            const error = new Error(`Insufficient stock for ${product.code}. Available: ${product.current_stock}, Requested: ${qty}`);
+            error.status = 400;
+            error.code = 'INSUFFICIENT_STOCK';
+            throw error;
+          }
+
+          await InventoryService.adjustStock({
+            productId: product.id,
+            direction: 'OUT',
+            quantity: qty,
+            reason: `Repair part used — ${job.tracking_id}`,
+            refType: 'Repair Job',
+            refId: job.id,
+            date: new Date(),
+            user
+          }, client);
+
+          await client.query(
+            `INSERT INTO repair_parts_used (
+              repair_job_id, product_id, product_code, name, quantity, customer_charge,
+              cost_price_snapshot, added_by, added_by_name
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [
+              job.id, product.id, product.code,
+              `${product.brand} ${product.model || product.product_name || ''}`.trim(),
+              qty, charge, parseFloat(product.cost_price || 0), user.id, user.name
+            ]
+          );
+        }
       }
 
       let approvalStatus = job.approval_status;
@@ -621,8 +722,8 @@ class RepairService {
         const checkLine = await client.query('SELECT id FROM repair_job_lines WHERE repair_job_id = $1 AND (is_approved_repair_line = TRUE OR line_type = $2)', [repairId, 'approved_repair']);
         if (checkLine.rows.length === 0) {
           await client.query(
-            `INSERT INTO repair_job_lines (repair_job_id, name, charges, duration, condition, line_type, is_approved_repair_line)
-             VALUES ($1, $2, $3, $4, 'Approved repair service after diagnosis', 'approved_repair', TRUE)`,
+            `INSERT INTO repair_job_lines (repair_job_id, name, catalog_price_snapshot, charges, quantity, duration, condition, line_type, is_approved_repair_line)
+             VALUES ($1, $2, $3, $3, 1, $4, 'Approved repair service after diagnosis', 'approved_repair', TRUE)`,
             [repairId, job.recommended_solution || 'Approved Repair Work', quoteAmt, job.duration || '1-2 Days']
           );
         }
@@ -823,6 +924,276 @@ class RepairService {
   }
 
   /**
+   * Add / Issue a spare part to a repair job
+   */
+  static async addUsedPart(repairId, partData, user) {
+    return await db.withTransaction(async (client) => {
+      const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1 FOR UPDATE', [repairId]);
+      if (jobRes.rows.length === 0) {
+        const error = new Error('Repair job not found.');
+        error.status = 404;
+        throw error;
+      }
+      const job = jobRes.rows[0];
+      const isOriginalDiag = job.origin_job_type === 'Diagnosis Job';
+      const isApproved = !isOriginalDiag || job.approval_status === 'Approved' || ['Repair Approved', 'Work in Progress', 'Waiting for Parts', 'Work Completed', 'Ready for Delivery', 'Delivered & Closed'].includes(job.status);
+
+      if (isOriginalDiag && !isApproved) {
+        const error = new Error('Spare parts cannot be issued or consumed before customer quotation approval.');
+        error.status = 400;
+        throw error;
+      }
+
+      const { partId, quantity, customerCharge } = partData;
+      if (!partId) {
+        const error = new Error('Spare part selection is required.');
+        error.status = 400;
+        throw error;
+      }
+
+      const qty = parseInt(quantity || 1, 10);
+      if (isNaN(qty) || qty <= 0) {
+        const error = new Error('Issued spare part quantity must be at least 1.');
+        error.status = 400;
+        throw error;
+      }
+
+      let charge = customerCharge !== undefined && customerCharge !== null && customerCharge !== '' ? parseFloat(customerCharge) : 0;
+      if (isNaN(charge) || charge < 0) charge = 0;
+
+      // Check repair_parts first
+      const partRes = await client.query('SELECT * FROM repair_parts WHERE id = $1 FOR UPDATE', [partId]);
+      if (partRes.rows.length > 0) {
+        const part = partRes.rows[0];
+        if (qty > part.current_stock) {
+          const error = new Error(`Insufficient stock for spare part ${part.code} (${part.name}). In stock: ${part.current_stock}, Requested: ${qty}`);
+          error.status = 400;
+          throw error;
+        }
+
+        // Deduct current_stock
+        await client.query(
+          'UPDATE repair_parts SET current_stock = current_stock - $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+          [qty, part.id]
+        );
+
+        if (charge === 0 && parseFloat(part.selling_price || 0) > 0) {
+          charge = parseFloat(part.selling_price || 0);
+        }
+
+        await client.query(
+          `INSERT INTO repair_parts_used (
+            repair_job_id, part_id, product_code, name, quantity, customer_charge,
+            cost_price_snapshot, added_by, added_by_name
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            job.id, part.id, part.code,
+            part.name,
+            qty, charge, parseFloat(part.cost_price || 0), user?.id || null, user?.name || 'Technician'
+          ]
+        );
+
+        await client.query(
+          `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            repairId, job.status,
+            `Spare part issued: ${part.name} (Qty: ${qty}, Charge: PKR ${charge.toFixed(2)})`,
+            user?.id || null, user?.name || 'Technician'
+          ]
+        );
+      } else {
+        // Fallback to products
+        const prodRes = await client.query('SELECT * FROM products WHERE id = $1 FOR UPDATE', [partId]);
+        if (prodRes.rows.length === 0) {
+          const error = new Error('Spare part not found in inventory catalog.');
+          error.status = 404;
+          throw error;
+        }
+        const product = prodRes.rows[0];
+        if (qty > product.current_stock) {
+          const error = new Error(`Insufficient stock for ${product.code}. In stock: ${product.current_stock}, Requested: ${qty}`);
+          error.status = 400;
+          throw error;
+        }
+
+        await InventoryService.adjustStock({
+          productId: product.id,
+          direction: 'OUT',
+          quantity: qty,
+          reason: `Repair part used — ${job.tracking_id}`,
+          refType: 'Repair Job',
+          refId: job.id,
+          date: new Date(),
+          user
+        }, client);
+
+        await client.query(
+          `INSERT INTO repair_parts_used (
+            repair_job_id, product_id, product_code, name, quantity, customer_charge,
+            cost_price_snapshot, added_by, added_by_name
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            job.id, product.id, product.code,
+            `${product.brand} ${product.model || product.product_name || ''}`.trim(),
+            qty, charge, parseFloat(product.cost_price || 0), user?.id || null, user?.name || 'Technician'
+          ]
+        );
+      }
+
+      await RepairService.syncLinkedInvoice(repairId, client);
+
+      const refreshed = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
+      emitEvent('repair.updated', refreshed.rows[0]);
+
+      return refreshed.rows[0];
+    });
+  }
+
+  /**
+   * Update an already-issued spare part (quantity or charge)
+   */
+  static async updateUsedPart(repairId, usedPartId, updateData, user) {
+    return await db.withTransaction(async (client) => {
+      const usedRes = await client.query(
+        'SELECT * FROM repair_parts_used WHERE id = $1 AND repair_job_id = $2 FOR UPDATE',
+        [usedPartId, repairId]
+      );
+      if (usedRes.rows.length === 0) {
+        const error = new Error('Issued spare part record not found on this repair job.');
+        error.status = 404;
+        throw error;
+      }
+      const used = usedRes.rows[0];
+      const oldQty = parseInt(used.quantity || 1, 10);
+      const newQty = updateData.quantity !== undefined ? parseInt(updateData.quantity, 10) : oldQty;
+      const newCharge = updateData.customerCharge !== undefined ? parseFloat(updateData.customerCharge) : parseFloat(used.customer_charge || 0);
+
+      if (isNaN(newQty) || newQty <= 0) {
+        const error = new Error('Part quantity must be at least 1.');
+        error.status = 400;
+        throw error;
+      }
+      if (isNaN(newCharge) || newCharge < 0) {
+        const error = new Error('Customer charge must be a non-negative number.');
+        error.status = 400;
+        throw error;
+      }
+
+      const qtyDiff = newQty - oldQty;
+
+      if (used.part_id) {
+        if (qtyDiff > 0) {
+          const partRes = await client.query('SELECT current_stock, name, code FROM repair_parts WHERE id = $1 FOR UPDATE', [used.part_id]);
+          if (partRes.rows.length > 0 && partRes.rows[0].current_stock < qtyDiff) {
+            const error = new Error(`Insufficient stock to add ${qtyDiff} more units. Available: ${partRes.rows[0].current_stock}`);
+            error.status = 400;
+            throw error;
+          }
+        }
+        if (qtyDiff !== 0) {
+          await client.query(
+            'UPDATE repair_parts SET current_stock = current_stock - $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+            [qtyDiff, used.part_id]
+          );
+        }
+      } else if (used.product_id && qtyDiff !== 0) {
+        await InventoryService.adjustStock({
+          productId: used.product_id,
+          direction: qtyDiff > 0 ? 'OUT' : 'IN',
+          quantity: Math.abs(qtyDiff),
+          reason: `Repair part quantity adjustment on ${repairId}`,
+          refType: 'Repair Job',
+          refId: repairId,
+          date: new Date(),
+          user
+        }, client);
+      }
+
+      await client.query(
+        `UPDATE repair_parts_used SET quantity = $1, customer_charge = $2 WHERE id = $3`,
+        [newQty, newCharge, usedPartId]
+      );
+
+      const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
+      await client.query(
+        `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          repairId, jobRes.rows[0].status,
+          `Spare part updated: ${used.name} (New Qty: ${newQty}, New Charge: PKR ${newCharge.toFixed(2)})`,
+          user?.id || null, user?.name || 'Technician'
+        ]
+      );
+
+      await RepairService.syncLinkedInvoice(repairId, client);
+
+      const refreshed = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
+      emitEvent('repair.updated', refreshed.rows[0]);
+
+      return refreshed.rows[0];
+    });
+  }
+
+  /**
+   * Remove an issued spare part and restore stock
+   */
+  static async removeUsedPart(repairId, usedPartId, user) {
+    return await db.withTransaction(async (client) => {
+      const usedRes = await client.query(
+        'SELECT * FROM repair_parts_used WHERE id = $1 AND repair_job_id = $2 FOR UPDATE',
+        [usedPartId, repairId]
+      );
+      if (usedRes.rows.length === 0) {
+        const error = new Error('Issued spare part record not found on this repair job.');
+        error.status = 404;
+        throw error;
+      }
+      const used = usedRes.rows[0];
+      const returnQty = parseInt(used.quantity || 1, 10);
+
+      // Return stock back to inventory
+      if (used.part_id) {
+        await client.query(
+          'UPDATE repair_parts SET current_stock = current_stock + $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+          [returnQty, used.part_id]
+        );
+      } else if (used.product_id) {
+        await InventoryService.adjustStock({
+          productId: used.product_id,
+          direction: 'IN',
+          quantity: returnQty,
+          reason: `Repair part returned from job ${repairId}`,
+          refType: 'Repair Job',
+          refId: repairId,
+          date: new Date(),
+          user
+        }, client);
+      }
+
+      await client.query('DELETE FROM repair_parts_used WHERE id = $1', [usedPartId]);
+
+      const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
+      await client.query(
+        `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          repairId, jobRes.rows[0].status,
+          `Spare part removed: ${used.name} (${returnQty} units returned to inventory)`,
+          user?.id || null, user?.name || 'Technician'
+        ]
+      );
+
+      await RepairService.syncLinkedInvoice(repairId, client);
+
+      const refreshed = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
+      emitEvent('repair.updated', refreshed.rows[0]);
+
+      return refreshed.rows[0];
+    });
+  }
+
+  /**
    * Get full repair job card details
    */
   static async getJobDetails(repairId, userRole = 'admin') {
@@ -835,7 +1206,7 @@ class RepairService {
     // If technician, mask cost_price_snapshot
     const partsRes = await db.query(
       `SELECT 
-        id, repair_job_id, product_id, product_code, name, quantity, customer_charge,
+        id, repair_job_id, part_id, product_id, product_code, name, quantity, customer_charge,
         ${userRole === 'technician' ? '0.00 as cost_price_snapshot' : 'cost_price_snapshot'},
         added_by, added_by_name, added_at
        FROM repair_parts_used 
@@ -867,6 +1238,8 @@ class RepairService {
       technicianId: job.technician_id,
       technicianName: job.technician_name,
       priority: job.priority,
+      categoryId: job.category_id,
+      categoryName: job.category_name,
       productType: job.product_type,
       brand: job.brand,
       model: job.model,
@@ -899,27 +1272,40 @@ class RepairService {
       expectedCompletion: job.expected_completion,
       invoiceId: isTech ? null : job.invoice_id,
       createdAt: job.created_at,
-      lines: linesRes.rows.map(line => ({
-        id: line.id,
-        serviceId: line.service_id,
-        name: line.name,
-        charges: isTech ? null : parseFloat(line.charges || 0),
-        duration: line.duration,
-        condition: line.condition,
-        lineType: line.line_type || 'repair',
-        isApprovedRepairLine: line.is_approved_repair_line
-      })),
-      usedParts: partsRes.rows.map(part => ({
-        id: part.id,
-        productId: part.product_id,
-        productCode: part.product_code,
-        name: part.name,
-        quantity: parseInt(part.quantity || 1, 10),
-        customerCharge: isTech ? null : parseFloat(part.customer_charge || 0),
-        costPriceSnapshot: isTech ? null : parseFloat(part.cost_price_snapshot || 0),
-        addedBy: part.added_by_name || part.added_by,
-        addedAt: part.added_at
-      })),
+      lines: linesRes.rows.map(line => {
+        const unitCharge = parseFloat(line.charges || 0);
+        const qty = parseInt(line.quantity || 1, 10);
+        return {
+          id: line.id,
+          serviceId: line.service_id,
+          name: line.name,
+          catalogPriceSnapshot: isTech ? null : parseFloat(line.catalog_price_snapshot !== null && line.catalog_price_snapshot !== undefined ? line.catalog_price_snapshot : unitCharge),
+          charges: isTech ? null : unitCharge,
+          quantity: qty,
+          lineTotal: isTech ? null : unitCharge * qty,
+          duration: line.duration,
+          condition: line.condition,
+          lineType: line.line_type || 'repair',
+          isApprovedRepairLine: line.is_approved_repair_line
+        };
+      }),
+      usedParts: partsRes.rows.map(part => {
+        const unitCharge = parseFloat(part.customer_charge || 0);
+        const qty = parseInt(part.quantity || 1, 10);
+        return {
+          id: part.id,
+          partId: part.part_id || part.product_id,
+          productId: part.product_id,
+          productCode: part.product_code,
+          name: part.name,
+          quantity: qty,
+          customerCharge: isTech ? null : unitCharge,
+          costPriceSnapshot: isTech ? null : parseFloat(part.cost_price_snapshot || 0),
+          lineTotal: isTech ? null : unitCharge * qty,
+          addedBy: part.added_by_name || part.added_by,
+          addedAt: part.added_at
+        };
+      }),
       history: historyRes.rows.map(h => ({
         id: h.id,
         status: h.status,

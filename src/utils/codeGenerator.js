@@ -12,22 +12,32 @@ async function getNextProductCode(categoryId, client = db) {
     }
   }
 
-  // Count existing products with this prefix
+  // Count existing products with this prefix (case-insensitive)
   const res = await client.query(
-    `SELECT code FROM products WHERE code LIKE $1 ORDER BY id DESC`,
+    `SELECT code FROM products WHERE code ILIKE $1`,
     [`${prefix}-%`]
   );
 
   let maxNum = 0;
   for (const row of res.rows) {
-    const numPart = parseInt(row.code.replace(`${prefix}-`, ''), 10);
+    const parts = String(row.code).split('-');
+    const numPart = parseInt(parts[parts.length - 1], 10);
     if (!isNaN(numPart) && numPart > maxNum) {
       maxNum = numPart;
     }
   }
 
-  const nextNum = maxNum + 1;
-  return `${prefix}-${String(nextNum).padStart(4, '0')}`;
+  let nextNum = maxNum + 1;
+  let candidate = `${prefix}-${String(nextNum).padStart(4, '0')}`;
+
+  while (true) {
+    const check = await client.query('SELECT 1 FROM products WHERE code = $1', [candidate]);
+    if (check.rows.length === 0) break;
+    nextNum++;
+    candidate = `${prefix}-${String(nextNum).padStart(4, '0')}`;
+  }
+
+  return candidate;
 }
 
 /**
@@ -45,20 +55,30 @@ async function getNextInvoiceNo(typeKey, client = db) {
   const prefix = map[typeKey] || 'INV';
 
   const res = await client.query(
-    `SELECT invoice_no FROM invoices WHERE invoice_no LIKE $1 ORDER BY id DESC`,
+    `SELECT invoice_no FROM invoices WHERE invoice_no ILIKE $1`,
     [`${prefix}-%`]
   );
 
   let maxNum = 0;
   for (const row of res.rows) {
-    const numPart = parseInt(row.invoice_no.replace(`${prefix}-`, ''), 10);
+    const parts = String(row.invoice_no).split('-');
+    const numPart = parseInt(parts[parts.length - 1], 10);
     if (!isNaN(numPart) && numPart > maxNum) {
       maxNum = numPart;
     }
   }
 
-  const nextNum = maxNum + 1;
-  return `${prefix}-${String(nextNum).padStart(5, '0')}`;
+  let nextNum = maxNum + 1;
+  let candidate = `${prefix}-${String(nextNum).padStart(5, '0')}`;
+
+  while (true) {
+    const check = await client.query('SELECT 1 FROM invoices WHERE invoice_no = $1', [candidate]);
+    if (check.rows.length === 0) break;
+    nextNum++;
+    candidate = `${prefix}-${String(nextNum).padStart(5, '0')}`;
+  }
+
+  return candidate;
 }
 
 /**
@@ -68,12 +88,11 @@ async function getNextTrackingId(client = db) {
   const prefix = 'RPR';
 
   const res = await client.query(
-    `SELECT tracking_id FROM repair_jobs WHERE tracking_id LIKE 'RPR-%' ORDER BY id DESC`
+    `SELECT tracking_id FROM repair_jobs WHERE tracking_id ILIKE 'RPR-%'`
   );
 
   let maxNum = 0;
   for (const row of res.rows) {
-    // Extract the trailing number whether it was RPR-2026-00001 or RPR-00001
     const parts = String(row.tracking_id).split('-');
     const lastPart = parts[parts.length - 1];
     const numPart = parseInt(lastPart, 10);
@@ -82,8 +101,17 @@ async function getNextTrackingId(client = db) {
     }
   }
 
-  const nextNum = maxNum + 1;
-  return `${prefix}-${String(nextNum).padStart(5, '0')}`;
+  let nextNum = maxNum + 1;
+  let candidate = `${prefix}-${String(nextNum).padStart(5, '0')}`;
+
+  while (true) {
+    const check = await client.query('SELECT 1 FROM repair_jobs WHERE tracking_id = $1', [candidate]);
+    if (check.rows.length === 0) break;
+    nextNum++;
+    candidate = `${prefix}-${String(nextNum).padStart(5, '0')}`;
+  }
+
+  return candidate;
 }
 
 /**
@@ -91,20 +119,30 @@ async function getNextTrackingId(client = db) {
  */
 async function getNextEntityId(table, idColumn, prefix, padLength = 4, client = db) {
   const res = await client.query(
-    `SELECT ${idColumn} as entity_id FROM ${table} WHERE ${idColumn} LIKE $1 ORDER BY ${idColumn} DESC`,
+    `SELECT ${idColumn} as entity_id FROM ${table} WHERE ${idColumn} ILIKE $1`,
     [`${prefix}-%`]
   );
 
   let maxNum = 0;
   for (const row of res.rows) {
-    const numPart = parseInt(String(row.entity_id).replace(`${prefix}-`, ''), 10);
+    const parts = String(row.entity_id).split('-');
+    const numPart = parseInt(parts[parts.length - 1], 10);
     if (!isNaN(numPart) && numPart > maxNum) {
       maxNum = numPart;
     }
   }
 
-  const nextNum = maxNum + 1;
-  return `${prefix}-${String(nextNum).padStart(padLength, '0')}`;
+  let nextNum = maxNum + 1;
+  let candidate = `${prefix}-${String(nextNum).padStart(padLength, '0')}`;
+
+  while (true) {
+    const check = await client.query(`SELECT 1 FROM ${table} WHERE ${idColumn} = $1`, [candidate]);
+    if (check.rows.length === 0) break;
+    nextNum++;
+    candidate = `${prefix}-${String(nextNum).padStart(padLength, '0')}`;
+  }
+
+  return candidate;
 }
 
 module.exports = {
