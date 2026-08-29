@@ -1136,6 +1136,70 @@ class InvoiceService {
       }
     }
 
+    // If linked to a repair job, fetch device & repair metadata
+    let repairDetails = null;
+    let computedItems = itemsRes.rows;
+
+    if (invoice.repair_job_id) {
+      try {
+        const jobRes = await db.query('SELECT * FROM repair_jobs WHERE id = $1', [invoice.repair_job_id]);
+        if (jobRes.rows.length > 0) {
+          const job = jobRes.rows[0];
+          repairDetails = {
+            trackingId: job.tracking_id,
+            jobType: job.job_type,
+            deviceType: job.product_type,
+            brand: job.brand,
+            model: job.model,
+            serial: job.serial,
+            problem: job.problem,
+            diagnosisFee: parseFloat(job.diagnosis_fee || 0),
+            extraCharges: parseFloat(job.extra_charges || 0),
+            approvalStatus: job.approval_status
+          };
+
+          // If invoice_items is empty, fetch lines and parts directly from repair tables
+          if (computedItems.length === 0) {
+            const linesRes = await db.query('SELECT * FROM repair_job_lines WHERE repair_job_id = $1', [job.id]);
+            const partsRes = await db.query('SELECT * FROM repair_parts_used WHERE repair_job_id = $1', [job.id]);
+
+            computedItems = [
+              ...linesRes.rows.map(l => ({
+                id: l.id,
+                item_type: l.line_type === 'diagnosis' ? 'diagnosis' : 'service',
+                product_id: null,
+                service_id: l.service_id,
+                code: l.service_id || 'SRV',
+                name: l.name,
+                description: l.condition || l.name,
+                quantity: l.quantity || 1,
+                unit_price: parseFloat(l.charges || 0),
+                discount: 0,
+                cost_price_snapshot: 0,
+                line_total: parseFloat(l.charges || 0) * parseInt(l.quantity || 1, 10)
+              })),
+              ...partsRes.rows.map(p => ({
+                id: p.id,
+                item_type: 'part',
+                product_id: p.product_id,
+                service_id: null,
+                code: p.product_code || 'PART',
+                name: p.product_name,
+                description: `Part for ${job.brand} ${job.model}`,
+                quantity: p.quantity || 1,
+                unit_price: parseFloat(p.customer_charge || 0),
+                discount: 0,
+                cost_price_snapshot: parseFloat(p.cost_price || 0),
+                line_total: parseFloat(p.customer_charge || 0) * parseInt(p.quantity || 1, 10)
+              }))
+            ];
+          }
+        }
+      } catch (err) {
+        console.error('[getInvoiceById] Repair lookup warning:', err.message);
+      }
+    }
+
     return {
       id: invoice.id,
       invoiceNo: invoice.invoice_no,
@@ -1170,10 +1234,13 @@ class InvoiceService {
       refundMethod: invoice.refund_method,
       refundReference: invoice.refund_reference,
       repairJobId: invoice.repair_job_id,
+      repairDetails: repairDetails,
+      deviceInfo: repairDetails ? `${repairDetails.brand || ''} ${repairDetails.model || ''}`.trim() : null,
+      trackingId: repairDetails ? repairDetails.trackingId : null,
       createdById: invoice.created_by,
       createdByName: invoice.created_by_name,
       createdAt: invoice.created_at,
-      items: itemsRes.rows.map(item => {
+      items: computedItems.map(item => {
         const qty = parseFloat(item.quantity || 1);
         const rate = parseFloat(item.unit_price || 0);
         const discount = parseFloat(item.discount || 0);
@@ -1192,7 +1259,6 @@ class InvoiceService {
           rate: rate,
           amount: grossAmount,
           discount: discount,
-          costPriceSnapshot: parseFloat(item.cost_price_snapshot || 0),
           lineTotal: lineTotal
         };
       })
