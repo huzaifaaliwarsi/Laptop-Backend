@@ -945,27 +945,15 @@ class InvoiceService {
         actualMoneyReceived = initialSettlement;
       } else if (method === 'Exchange Credit' || method === 'Exchange' || method === 'Product Replacement / Exchange') {
         exchangeValue = initialSettlement;
-        if (replacementMode === 'same') {
-          repQty = parseInt(sameReplacementQty || qty, 10);
-          await InventoryService.adjustStock({
-            productId: product.id,
-            direction: 'IN',
-            quantity: repQty,
-            reason: `Same product replacement for return ${returnId}`,
-            refType: 'Vendor Return',
-            refId: returnId,
-            date: date || new Date(),
-            user
-          }, client);
-          repProduct = product;
-        } else if (replacementProductData) {
+        // If a different replacement product was received from vendor right now, add its stock
+        if (replacementMode === 'different' && replacementProductData) {
           repQty = parseInt(replacementProductData.quantity || 1, 10);
           const sourceData = {
             inventoryType: 'Vendor Purchased',
             sourceName: vendor.name,
             invoiceNo: returnId,
             date: date || new Date(),
-            reason: 'Different product replacement received',
+            reason: 'Different product replacement received in vendor exchange',
             refType: 'Vendor Return',
             refId: returnId
           };
