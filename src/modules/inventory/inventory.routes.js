@@ -147,23 +147,29 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     const result = await db.withTransaction(async (client) => {
       // 1. Resolve vendorId if vendorName given but no ID
-      if (hasVendor) {
-        if (vendorId && !vendorName) {
-          const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE id = $1', [vendorId]);
-          if (vRes.rows.length > 0) {
-            vendorName = vRes.rows[0].name;
-          }
-        } else if (vendorName && !vendorId) {
-          const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE LOWER(name) = LOWER($1)', [vendorName.trim()]);
-          if (vRes.rows.length > 0) {
-            vendorId = vRes.rows[0].id;
-            vendorName = vRes.rows[0].name;
-          } else {
-            vendorId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
-            await client.query('INSERT INTO vendors (id, name, contact) VALUES ($1, $2, $3)', [
-              vendorId, vendorName.trim(), req.body.vendorContact || req.body.contact || null
-            ]);
-          }
+      // 1. Resolve or default vendor
+      if (!vendorId && vendorName && vendorName.trim() !== '' && vendorName !== 'Manual Entry') {
+        const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE LOWER(name) = LOWER($1)', [vendorName.trim()]);
+        if (vRes.rows.length > 0) {
+          vendorId = vRes.rows[0].id;
+          vendorName = vRes.rows[0].name;
+        } else {
+          vendorId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
+          await client.query('INSERT INTO vendors (id, name, contact) VALUES ($1, $2, $3)', [
+            vendorId, vendorName.trim(), req.body.vendorContact || req.body.contact || null
+          ]);
+        }
+      } else if (!vendorId && (!vendorName || vendorName.trim() === '' || vendorName === 'Manual Entry')) {
+        const vRes = await client.query(`SELECT id, name FROM vendors WHERE LOWER(name) = 'direct purchase' OR LOWER(name) = 'cash vendor' LIMIT 1`);
+        if (vRes.rows.length > 0) {
+          vendorId = vRes.rows[0].id;
+          vendorName = vRes.rows[0].name;
+        } else {
+          vendorId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
+          vendorName = 'Cash Vendor / Direct Purchase';
+          await client.query('INSERT INTO vendors (id, name, contact) VALUES ($1, $2, $3)', [
+            vendorId, vendorName, null
+          ]);
         }
       }
 
@@ -171,7 +177,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       let generatedInvoiceNo = purchaseInvoiceNo;
       let generatedInvoiceId = null;
 
-      if (hasVendor && totalCost > 0) {
+      if (totalCost > 0) {
         if (!generatedInvoiceNo || generatedInvoiceNo === 'MANUAL') {
           generatedInvoiceNo = await getNextInvoiceNo('vendor_purchase', client);
         }
@@ -179,20 +185,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
 
       const sourceData = {
-        sourceName: vendorName || 'Manual Entry',
+        sourceName: vendorName || 'Direct Purchase',
         sourceId: vendorId || 'MANUAL',
         invoiceNo: generatedInvoiceNo || 'MANUAL',
         date: purchaseDate,
-        reason: req.body.reason || (vendorName ? `Stock purchased from ${vendorName}` : 'Manual opening stock'),
-        refType: hasVendor ? 'Vendor Purchase' : 'Manual Entry',
+        reason: req.body.reason || (vendorName ? `Stock purchased from ${vendorName}` : 'Stock Purchase'),
+        refType: 'Vendor Purchase',
         refId: generatedInvoiceId || vendorId || 'MANUAL'
       };
 
       const productResult = await InventoryService.addOrMergeProduct(req.body, sourceData, req.user, client);
       const product = productResult.product;
 
-      // 2. If vendor purchase with totalCost > 0, generate Invoice, Payments and Accounts (Ledger)
-      if (hasVendor && totalCost > 0) {
+      // 2. If purchase with totalCost > 0, generate Invoice, Payments and Accounts (Ledger)
+      if (totalCost > 0) {
         // Compute paid amount
         let reqPaid = req.body.paid !== undefined ? req.body.paid : req.body.vendorPaid;
         const paidAmount = reqPaid === undefined || reqPaid === ''
@@ -281,6 +287,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     await CacheService.invalidatePattern('route:/api/products*');
     await CacheService.invalidatePattern('route:/api/categories*');
     await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/accounts*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidatePattern('route:/api/reports*');
 
     return res.status(201).json({
       success: true,
@@ -645,6 +654,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     await CacheService.invalidatePattern('route:/api/dashboard*');
     await CacheService.invalidatePattern('route:/api/vendors*');
     await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidatePattern('route:/api/accounts*');
+    await CacheService.invalidatePattern('route:/api/reports*');
 
     return res.json({
       success: true,

@@ -26,6 +26,90 @@ router.get('/drawer-balance', requireSalesOrAdmin, async (req, res, next) => {
   }
 });
 
+// POST /api/accounts/drawer-transaction - Top-up / Deposit or Withdraw money directly to/from Cash Drawer / Bank Account
+router.post('/drawer-transaction', requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const { type, method, amount: reqAmount, notes, date } = req.body;
+    const amount = parseFloat(reqAmount || 0);
+    if (isNaN(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        code: 'INVALID_AMOUNT',
+        message: 'Amount must be greater than zero.'
+      });
+    }
+
+    const pMethod = method === 'Online' ? 'Online' : 'Cash';
+    const isDeposit = type === 'Deposit' || type === 'Cash In' || type === 'Add';
+    const direction = isDeposit ? 'Received' : 'Paid';
+
+    const payId = await getNextEntityId('payments', 'id', 'PAY', 5);
+    const result = await db.query(`
+      INSERT INTO payments (
+        id, party_type, party_id, party_name, account_type,
+        direction, amount, date, payment_method, reference_id, notes, affects_money,
+        is_initial_settlement, created_by, created_by_name
+      ) VALUES (
+        $1, 'Business', 'TREASURY', 'Cash Drawer / Treasury', $2,
+        $3, $4, $5, $6, $7, $8, TRUE,
+        FALSE, $9, $10
+      ) RETURNING *
+    `, [
+      payId, isDeposit ? 'Drawer Deposit' : 'Drawer Withdrawal',
+      direction, amount, date || new Date(), pMethod, null,
+      notes ? notes.trim() : (isDeposit ? `${pMethod} Drawer Deposit / Cash In` : `${pMethod} Drawer Withdrawal / Cash Out`),
+      req.user.id, req.user.name
+    ]);
+
+    const newCash = await getAvailableBalance('Cash');
+    const newOnline = await getAvailableBalance('Online');
+
+    emitEvent('settings.balances_updated', { cash: newCash, online: newOnline });
+
+    return res.status(201).json({
+      success: true,
+      message: `${pMethod} ${isDeposit ? 'deposited' : 'withdrawn'} successfully!`,
+      data: {
+        payment: result.rows[0],
+        liveCash: newCash,
+        liveOnline: newOnline
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/accounts/drawer-transactions - Recent 20 drawer deposits / withdrawals
+router.get('/drawer-transactions', requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const result = await db.query(`
+      SELECT p.*, u.name as performed_by_name
+      FROM payments p
+      LEFT JOIN users u ON u.id = p.created_by
+      WHERE p.account_type IN ('Drawer Deposit', 'Drawer Withdrawal')
+      ORDER BY p.date DESC, p.created_at DESC
+      LIMIT 20
+    `);
+    return res.json({
+      success: true,
+      data: result.rows.map(r => ({
+        id: r.id,
+        type: r.account_type,
+        direction: r.direction,
+        amount: parseFloat(r.amount || 0),
+        paymentMethod: r.payment_method,
+        notes: r.notes,
+        date: r.date,
+        performedBy: r.created_by_name || r.performed_by_name || 'Admin',
+        createdAt: r.created_at
+      }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/accounts - Filtered receivables & payables
 router.get('/', requireSalesOrAdmin, async (req, res, next) => {
   try {

@@ -186,6 +186,8 @@ router.post('/vendor-return', requireAdmin, async (req, res, next) => {
     await CacheService.invalidatePattern('route:/api/dashboard*');
     await CacheService.invalidatePattern('route:/api/products*');
     await CacheService.invalidatePattern('route:/api/vendors*');
+    await CacheService.invalidatePattern('route:/api/accounts*');
+    await CacheService.invalidatePattern('route:/api/reports*');
     return res.status(201).json({
       success: true,
       message: 'Vendor return recorded successfully',
@@ -314,6 +316,9 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
     await CacheService.invalidatePattern('route:/api/dashboard*');
     await CacheService.invalidatePattern('route:/api/products*');
     await CacheService.invalidatePattern('route:/api/customers*');
+    await CacheService.invalidatePattern('route:/api/vendors*');
+    await CacheService.invalidatePattern('route:/api/accounts*');
+    await CacheService.invalidatePattern('route:/api/reports*');
     return res.json({
       success: true,
       message: 'Sales invoice voided and inventory restored successfully',
