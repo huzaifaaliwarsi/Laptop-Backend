@@ -133,9 +133,10 @@ router.get('/opening-balances', authenticateToken, requireAdmin, async (req, res
 // PUT /api/settings/opening-balances (Admin only)
 router.put('/opening-balances', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
-    const { openingCash, openingOnline } = req.body;
-    const cash = Math.max(0, parseFloat(openingCash || 0));
-    const online = Math.max(0, parseFloat(openingOnline || 0));
+    const rawCash = req.body.openingCash !== undefined ? req.body.openingCash : req.body.openingCashBalance;
+    const rawOnline = req.body.openingOnline !== undefined ? req.body.openingOnline : req.body.openingOnlineBalance;
+    const cash = Math.max(0, parseFloat(rawCash || 0));
+    const online = Math.max(0, parseFloat(rawOnline || 0));
 
     await db.query(`
       INSERT INTO business_settings (id, opening_cash, opening_online, updated_at)

@@ -786,47 +786,118 @@ class InvoiceService {
       const refundAmount = Math.min(parseFloat(reqRefund !== undefined ? reqRefund : invoice.paid), parseFloat(invoice.paid || 0));
       const rMethod = refundMethod || 'Cash';
 
-      // Restock items
-      const itemsRes = await client.query('SELECT * FROM invoice_items WHERE invoice_id = $1', [id]);
-      for (const item of itemsRes.rows) {
-        if (item.product_id && item.quantity > 0) {
-          await InventoryService.adjustStock({
-            productId: item.product_id,
-            direction: 'IN',
-            quantity: item.quantity,
-            reason: `Sales return / invoice void: ${invoice.invoice_no}`,
-            refType: 'Sales Void',
-            refId: invoice.id,
-            date: date || new Date(),
-            user
-          }, client);
+      const invType = invoice.type || invoice.type_key;
+
+      if (invType === 'Customer Purchase') {
+        // Customer Purchase / Buyback: items were added to stock, so voiding removes them from stock
+        const itemsRes = await client.query('SELECT * FROM invoice_items WHERE invoice_id = $1', [id]);
+        for (const item of itemsRes.rows) {
+          if (item.product_id && item.quantity > 0) {
+            await InventoryService.adjustStock({
+              productId: item.product_id,
+              direction: 'OUT',
+              quantity: item.quantity,
+              reason: `Customer Buyback void / return: ${invoice.invoice_no}`,
+              refType: 'Customer Purchase Void',
+              refId: invoice.id,
+              date: date || new Date(),
+              user
+            }, client);
+          }
         }
-      }
+        // Record recovery into drawer if money is recovered from customer
+        if (refundAmount > 0) {
+          const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
+          await client.query(
+            `INSERT INTO payments (
+              id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+              direction, amount, date, payment_method, reference_id, notes, affects_money,
+              is_initial_settlement, created_by, created_by_name
+            ) VALUES (
+              $1, $2, $3, 'Customer', $4, $5, 'Customer Refund',
+              'Received', $6, $7, $8, $9, $10, TRUE, FALSE, $11, $12
+            )`,
+            [
+              payId, invoice.id, invoice.invoice_no, invoice.party_id, invoice.party_name,
+              refundAmount, date || new Date(), rMethod, referenceId ? referenceId.trim() : null,
+              `Customer Buyback Reversal / Void: ${reason.trim()}`, user.id, user.name
+            ]
+          );
+        }
+      } else if (invType === 'Exchange Invoice' || invType === 'Product Exchange') {
+        // Exchange: item 1 (shop product given) goes back IN, item 2 (customer item taken) goes OUT
+        const itemsRes = await client.query('SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY id ASC', [id]);
+        if (itemsRes.rows.length >= 2) {
+          const shopItem = itemsRes.rows[0];
+          const custItem = itemsRes.rows[1];
+          if (shopItem.product_id) {
+            await InventoryService.adjustStock({
+              productId: shopItem.product_id,
+              direction: 'IN',
+              quantity: shopItem.quantity || 1,
+              reason: `Exchange void / reversal: ${invoice.invoice_no}`,
+              refType: 'Exchange Void',
+              refId: invoice.id,
+              date: date || new Date(),
+              user
+            }, client);
+          }
+          if (custItem.product_id) {
+            await InventoryService.adjustStock({
+              productId: custItem.product_id,
+              direction: 'OUT',
+              quantity: custItem.quantity || 1,
+              reason: `Exchange void / reversal: ${invoice.invoice_no}`,
+              refType: 'Exchange Void',
+              refId: invoice.id,
+              date: date || new Date(),
+              user
+            }, client);
+          }
+        }
+      } else {
+        // Standard Sales Invoice: restock items
+        const itemsRes = await client.query('SELECT * FROM invoice_items WHERE invoice_id = $1', [id]);
+        for (const item of itemsRes.rows) {
+          if (item.product_id && item.quantity > 0) {
+            await InventoryService.adjustStock({
+              productId: item.product_id,
+              direction: 'IN',
+              quantity: item.quantity,
+              reason: `Sales return / invoice void: ${invoice.invoice_no}`,
+              refType: 'Sales Void',
+              refId: invoice.id,
+              date: date || new Date(),
+              user
+            }, client);
+          }
+        }
 
-      // Cancel open customer receivable
-      await client.query(
-        `UPDATE accounts SET status = 'Cancelled', remaining = 0 WHERE invoice_id = $1 AND status = 'Open'`,
-        [id]
-      );
-
-      // Record refund payout in payments table if refund given
-      if (refundAmount > 0) {
-        const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
+        // Cancel open customer receivable
         await client.query(
-          `INSERT INTO payments (
-            id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
-            direction, amount, date, payment_method, reference_id, notes, affects_money,
-            is_initial_settlement, created_by, created_by_name
-          ) VALUES (
-            $1, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
-            'Paid', $6, $7, $8, $9, $10, TRUE, FALSE, $11, $12
-          )`,
-          [
-            payId, invoice.id, invoice.invoice_no, invoice.party_id, invoice.party_name,
-            refundAmount, date || new Date(), rMethod, referenceId ? referenceId.trim() : null,
-            `Sales Void Refund: ${reason.trim()}`, user.id, user.name
-          ]
+          `UPDATE accounts SET status = 'Cancelled', remaining = 0 WHERE invoice_id = $1 AND status = 'Open'`,
+          [id]
         );
+
+        // Record refund payout in payments table if refund given
+        if (refundAmount > 0) {
+          const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
+          await client.query(
+            `INSERT INTO payments (
+              id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+              direction, amount, date, payment_method, reference_id, notes, affects_money,
+              is_initial_settlement, created_by, created_by_name
+            ) VALUES (
+              $1, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
+              'Paid', $6, $7, $8, $9, $10, TRUE, FALSE, $11, $12
+            )`,
+            [
+              payId, invoice.id, invoice.invoice_no, invoice.party_id, invoice.party_name,
+              refundAmount, date || new Date(), rMethod, referenceId ? referenceId.trim() : null,
+              `Sales Void Refund: ${reason.trim()}`, user.id, user.name
+            ]
+          );
+        }
       }
 
       // Update invoice to voided
@@ -944,21 +1015,90 @@ class InvoiceService {
       if (method === 'Cash' || method === 'Online') {
         actualMoneyReceived = initialSettlement;
       } else if (method === 'Exchange Credit' || method === 'Exchange' || method === 'Product Replacement / Exchange') {
-        exchangeValue = initialSettlement;
-        // If a different replacement product was received from vendor right now, add its stock
-        if (replacementMode === 'different' && replacementProductData) {
-          repQty = parseInt(replacementProductData.quantity || 1, 10);
-          const sourceData = {
-            inventoryType: 'Vendor Purchased',
-            sourceName: vendor.name,
-            invoiceNo: returnId,
+        if (replacementMode === 'same') {
+          // 1. Same Product Replacement: Inward fresh unit of the SAME model into inventory
+          repQty = qty;
+          await InventoryService.adjustStock({
+            productId: product.id,
+            direction: 'IN',
+            quantity: repQty,
+            reason: `Same product replacement received from vendor (${returnId})`,
+            refType: 'Vendor Return Replacement',
+            refId: returnId,
             date: date || new Date(),
-            reason: 'Different product replacement received in vendor exchange',
-            refType: 'Vendor Return',
-            refId: returnId
-          };
-          const repRes = await InventoryService.addOrMergeProduct(replacementProductData, sourceData, user, client);
-          repProduct = repRes.product;
+            user
+          }, client);
+          repProduct = product;
+          exchangeValue = amount;
+          initialSettlement = amount;
+        } else if (replacementMode === 'different' && replacementProductData) {
+          // 2. Different Product Replacement: Inward the new/different model into inventory
+          repQty = parseInt(replacementProductData.quantity || 1, 10);
+          if (replacementProductData.id) {
+            await InventoryService.adjustStock({
+              productId: replacementProductData.id,
+              direction: 'IN',
+              quantity: repQty,
+              reason: `Different product replacement received in vendor exchange (${returnId})`,
+              refType: 'Vendor Return Replacement',
+              refId: returnId,
+              date: date || new Date(),
+              user
+            }, client);
+            const getP = await client.query('SELECT * FROM products WHERE id = $1', [replacementProductData.id]);
+            repProduct = getP.rows[0];
+          } else {
+            const sourceData = {
+              inventoryType: 'Vendor Purchased',
+              sourceName: vendor.name,
+              invoiceNo: returnId,
+              date: date || new Date(),
+              reason: 'Different product replacement received in vendor exchange',
+              refType: 'Vendor Return',
+              refId: returnId
+            };
+            const repRes = await InventoryService.addOrMergeProduct(replacementProductData, sourceData, user, client);
+            repProduct = repRes.product;
+          }
+
+          const repRate = parseFloat(replacementProductData.costPrice || replacementProductData.cost_price || repProduct?.cost_price || rate);
+          const repTotal = repQty * repRate;
+          exchangeValue = repTotal;
+          initialSettlement = Math.min(amount, repTotal);
+
+          // Handle upgrade difference if replacement costs more than return
+          const priceDiff = repTotal - amount;
+          if (priceDiff > 0.005) {
+            const diffMethod = returnData.diffPaymentMethod || 'Cash';
+            if (diffMethod === 'Cash' || diffMethod === 'Online') {
+              const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
+              await client.query(`
+                INSERT INTO payments (
+                  id, account_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+                  direction, amount, date, payment_method, reference_id, notes, affects_money,
+                  is_initial_settlement, created_by, created_by_name
+                ) VALUES (
+                  $1, NULL, NULL, $2, 'Vendor', $3, $4, 'Vendor Payable',
+                  'Paid', $5, $6, $7, $8, $9, TRUE, TRUE, $10, $11
+                )
+              `, [
+                payId, returnId, vendor.id, vendor.name, priceDiff, date || new Date(),
+                diffMethod, referenceId || null,
+                `Upgrade difference paid to vendor for replacement (${repProduct?.code || ''})`,
+                user.id, user.name
+              ]);
+            } else {
+              const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
+              await client.query(`
+                INSERT INTO accounts (
+                  id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+                  amount, remaining, status, date
+                ) VALUES ($1, 'Vendor Payable', 'Vendor', $2, $3, NULL, $4, $5, $6, 'Open', $7)
+              `, [accId, vendor.id, vendor.name, returnId, priceDiff, priceDiff, date || new Date()]);
+            }
+          }
+        } else {
+          exchangeValue = initialSettlement;
         }
       } else if (method === 'Vendor Adjustment' || method === 'Vendor Payable Adjustment') {
         // Adjust against oldest open Vendor Payables
