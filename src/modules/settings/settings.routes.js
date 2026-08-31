@@ -177,9 +177,11 @@ router.post('/reset-database', authenticateToken, requireAdmin, async (req, res,
       await client.query('TRUNCATE TABLE repair_status_history CASCADE');
       await client.query('TRUNCATE TABLE repair_jobs CASCADE');
 
-      // Inventory
+      // Inventory & Spare Parts
       await client.query('TRUNCATE TABLE inventory_movements CASCADE');
       await client.query('TRUNCATE TABLE products CASCADE');
+      await client.query('TRUNCATE TABLE repair_parts_movements CASCADE');
+      await client.query('TRUNCATE TABLE repair_parts CASCADE');
 
       // Expenses & Logs
       await client.query('TRUNCATE TABLE expenses CASCADE');

@@ -13,6 +13,27 @@ function paymentStatus(total, paid, settled = false) {
   return 'Unpaid';
 }
 
+function normalizeInvoiceRow(row) {
+  if (!row) return row;
+  return {
+    ...row,
+    invoiceNo: row.invoice_no || row.invoiceNo,
+    partyName: row.party_name || row.partyName,
+    partyId: row.party_id || row.partyId,
+    partyType: row.party_type || row.partyType,
+    paymentMethod: row.payment_method || row.paymentMethod,
+    paymentStatus: row.payment_status || row.paymentStatus,
+    productTotal: row.product_total !== undefined ? parseFloat(row.product_total) : row.productTotal,
+    serviceTotal: row.service_total !== undefined ? parseFloat(row.service_total) : row.serviceTotal,
+    isVoided: row.is_voided !== undefined ? row.is_voided : row.isVoided,
+    referenceId: row.reference_id || row.referenceId,
+    repairJobId: row.repair_job_id || row.repairJobId,
+    total: row.total !== undefined ? parseFloat(row.total) : row.total,
+    paid: row.paid !== undefined ? parseFloat(row.paid) : row.paid,
+    balance: row.balance !== undefined ? parseFloat(row.balance) : row.balance
+  };
+}
+
 class InvoiceService {
   /**
    * Complete atomic POS retail sale
@@ -266,7 +287,7 @@ class InvoiceService {
       emitEvent('invoice.created', invoiceRes.rows[0]);
 
       return {
-        invoice: invoiceRes.rows[0],
+        invoice: normalizeInvoiceRow(invoiceRes.rows[0]),
         items: processedItems
       };
     });
@@ -410,7 +431,7 @@ class InvoiceService {
       emitEvent('invoice.created', invoiceRes.rows[0]);
 
       return {
-        invoice: invoiceRes.rows[0],
+        invoice: normalizeInvoiceRow(invoiceRes.rows[0]),
         products: processedItems
       };
     });
@@ -553,7 +574,7 @@ class InvoiceService {
       emitEvent('invoice.created', invoiceRes.rows[0]);
 
       return {
-        invoice: invoiceRes.rows[0],
+        invoice: normalizeInvoiceRow(invoiceRes.rows[0]),
         products: processedItems
       };
     });
@@ -750,7 +771,7 @@ class InvoiceService {
       emitEvent('invoice.created', invoiceRes.rows[0]);
 
       return {
-        invoice: invoiceRes.rows[0],
+        invoice: normalizeInvoiceRow(invoiceRes.rows[0]),
         shopProduct,
         receivedProduct: recResult.product
       };

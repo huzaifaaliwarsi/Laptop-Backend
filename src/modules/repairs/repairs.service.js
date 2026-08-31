@@ -3,6 +3,19 @@ const { getNextTrackingId, getNextEntityId, getNextInvoiceNo } = require('../../
 const { validateOutflow } = require('../../utils/financialFormulas');
 const InventoryService = require('../inventory/inventory.service');
 const { emitEvent } = require('../../config/socket');
+const {
+  buildIntakeConfirmationTemplate,
+  buildTrackingResponseTemplate,
+  buildStatusUpdateTemplate,
+  buildQuotationApprovalTemplate,
+  buildApprovalConfirmationTemplate,
+  buildDeclineConfirmationTemplate,
+  buildPaymentReceiptTemplate,
+  buildDeliveryClosedTemplate,
+  buildAdditionalWorkApprovalTemplate,
+  buildAdditionalWorkApprovedTemplate,
+  buildAdditionalWorkDeclinedTemplate
+} = require('../whatsapp/whatsapp.templates');
 
 function simpleRepairStatus(status) {
   if (['Job Received', 'Diagnosis Received'].includes(status)) return 'Received';
@@ -166,7 +179,7 @@ class RepairService {
   /**
    * Helper to append automated WhatsApp message to conversation
    */
-  static async sendAutomatedWhatsapp(job, customUpdate = '', client = db) {
+  static async sendAutomatedWhatsapp(job, customMessageOrNote = '', client = db, options = {}) {
     try {
       const settingsRes = await client.query('SELECT auto_status_notifications FROM whatsapp_settings WHERE id = 1');
       if (settingsRes.rows.length > 0 && settingsRes.rows[0].auto_status_notifications === false) {
@@ -190,32 +203,37 @@ class RepairService {
         );
       }
 
-      const total = parseFloat(job.total || 0);
-      const paid = parseFloat(job.paid || 0);
-      const remaining = Math.max(0, total - paid);
-      const payStatus = remaining <= 0.005 ? 'Paid' : paid > 0 ? 'Partial' : 'Unpaid';
-      const expected = job.expected_completion ? new Date(job.expected_completion).toLocaleDateString('en-PK', { year: 'numeric', month: 'short', day: '2-digit' }) : (job.duration || 'Not specified');
-
-      const device = [job.brand, job.model || job.product_name].filter(Boolean).join(' ') || job.product_type || 'Laptop/Device';
-      let messageText = 
-        `🔧 *LAPTOP REPAIR UPDATE*\n` +
-        `━━━━━━━━━━━━━━━━━━━━━\n` +
-        `📌 *Tracking ID:* ${job.tracking_id}\n` +
-        `💻 *Device:* ${device}\n` +
-        `⚡ *Problem:* ${job.problem || 'Hardware diagnosis'}\n` +
-        `📊 *Status:* ${simpleRepairStatus(job.status)}\n` +
-        `📅 *Expected Completion:* ${expected}\n` +
-        `💰 *Total Bill:* PKR ${total.toLocaleString('en-PK', { maximumFractionDigits: 2 })}\n` +
-        `💵 *Paid Advance:* PKR ${paid.toLocaleString('en-PK', { maximumFractionDigits: 2 })}\n` +
-        `💳 *Balance Due:* PKR ${remaining.toLocaleString('en-PK', { maximumFractionDigits: 2 })} (${payStatus})\n`;
-
-      if (customUpdate) {
-        messageText += `📝 *Latest Note:* ${customUpdate}\n`;
+      let messageText = '';
+      if (options.templateType === 'intake') {
+        messageText = buildIntakeConfirmationTemplate({
+          job,
+          requestedService: options.requestedService,
+          isDiagnosis: options.isDiagnosis
+        });
+      } else if (options.templateType === 'approval_request') {
+        messageText = buildQuotationApprovalTemplate(job);
+      } else if (options.templateType === 'approval_confirmed') {
+        messageText = buildApprovalConfirmationTemplate(job);
+      } else if (options.templateType === 'decline_confirmed') {
+        messageText = buildDeclineConfirmationTemplate(job);
+      } else if (options.templateType === 'payment_receipt') {
+        messageText = buildPaymentReceiptTemplate({
+          job,
+          amountPaid: options.amountPaid,
+          newBalance: options.newBalance
+        });
+      } else if (options.templateType === 'delivery_closed') {
+        messageText = buildDeliveryClosedTemplate(job);
+      } else if (typeof customMessageOrNote === 'string' && customMessageOrNote.includes('\n')) {
+        // Pre-formatted custom template string
+        messageText = customMessageOrNote;
+      } else {
+        // Status update template with customer-safe note
+        messageText = buildStatusUpdateTemplate({
+          job,
+          safeNote: customMessageOrNote
+        });
       }
-
-      messageText += 
-        `━━━━━━━━━━━━━━━━━━━━━\n` +
-        `💡 *Live Tracking:* Reply *3* or send *${job.tracking_id}* anytime to track live bench progress!`;
 
       await client.query(
         `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag)
@@ -481,7 +499,16 @@ class RepairService {
 
       const finalJobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
       const createdJob = finalJobRes.rows[0];
-      await RepairService.sendAutomatedWhatsapp(createdJob, isDiag ? 'Device received for technical diagnosis and quotation.' : 'Job created and received at repair desk.', client);
+
+      const requestedService = isDiag
+        ? (diagnosisServiceName || 'Diagnostic Inspection & Fault Analysis')
+        : (lines && lines.length > 0 && lines[0].name ? lines.map(l => l.name).join(', ') : (problem || 'Standard Hardware Service'));
+
+      await RepairService.sendAutomatedWhatsapp(createdJob, '', client, {
+        templateType: 'intake',
+        requestedService,
+        isDiagnosis: isDiag
+      });
 
       emitEvent('repair.created', createdJob);
 
@@ -508,13 +535,18 @@ class RepairService {
         updateNote, partId, partQty, partCharge
       } = updateData;
 
-      if (!updateNote || String(updateNote).trim() === '') {
-        const error = new Error('Short update note is required.');
-        error.status = 400;
-        throw error;
+      let validUserId = null;
+      if (user?.id) {
+        const uCheck = await client.query('SELECT id FROM users WHERE id = $1', [user.id]);
+        if (uCheck.rows.length > 0) validUserId = uCheck.rows[0].id;
       }
 
       let newStatus = reqStatus || job.status;
+      const finalNote = (updateNote && String(updateNote).trim() !== '')
+        ? String(updateNote).trim()
+        : (finalRemarks && String(finalRemarks).trim())
+        || (technicalNotes && String(technicalNotes).trim())
+        || `Technical update on workbench (${newStatus})`;
       const isOriginalDiag = job.origin_job_type === 'Diagnosis Job' || job.job_type === 'Diagnosis Job';
       const isApproved = job.approval_status === 'Approved' || ['Repair Approved', 'Work in Progress', 'Waiting for Parts', 'Work Completed', 'Ready for Delivery', 'Delivered & Closed'].includes(job.status);
 
@@ -587,6 +619,24 @@ class RepairService {
               qty, charge, parseFloat(part.cost_price || 0), user.id, user.name
             ]
           );
+
+          // Log in repair_parts_movements
+          try {
+            await client.query(
+              `INSERT INTO repair_parts_movements (
+                part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, balance_after, performed_by, performed_by_name
+              ) VALUES ($1, $2, $3, 'OUT', $4, $5, 'Repair Job Issuance', $6, $7, $8, $9)`,
+              [
+                part.id, part.code, part.name, qty,
+                `Issued to repair job ${job.id} (${job.customer_name})`,
+                job.id,
+                Math.max(0, parseInt(part.current_stock || 0, 10) - qty),
+                user.id, user.name
+              ]
+            );
+          } catch (mErr) {
+            console.error('[Spare Parts Movement] Issuance log error:', mErr.message);
+          }
         } else {
           // 2. Legacy fallback to products if matching product
           const prodRes = await client.query('SELECT * FROM products WHERE id = $1 FOR UPDATE', [partId]);
@@ -636,6 +686,22 @@ class RepairService {
         approvalRequestedAt = new Date();
       }
 
+      let parsedExpectedDate = null;
+      let durationStr = updateData.duration || null;
+      if (expectedCompletion && String(expectedCompletion).trim() !== '') {
+        const str = String(expectedCompletion).trim();
+        if (!isNaN(Date.parse(str))) {
+          parsedExpectedDate = new Date(str);
+        } else {
+          durationStr = str;
+          const match = str.match(/([0-9]+)\s*(?:day|d)/i);
+          if (match) {
+            const days = parseInt(match[1], 10);
+            parsedExpectedDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+          }
+        }
+      }
+
       // Update repair job
       const updateRes = await client.query(
         `UPDATE repair_jobs SET
@@ -651,12 +717,13 @@ class RepairService {
           final_remarks = COALESCE($10, final_remarks),
           approval_status = $11,
           approval_requested_at = $12,
+          duration = COALESCE($14, duration),
           updated_at = CURRENT_TIMESTAMP
          WHERE id = $13
          RETURNING *`,
         [
           newStatus,
-          expectedCompletion || null,
+          parsedExpectedDate,
           workProgress !== undefined ? parseInt(workProgress, 10) : null,
           quotationAmount !== undefined && quotationAmount !== '' ? parseFloat(quotationAmount) : null,
           diagnosedIssue ? diagnosedIssue.trim() : null,
@@ -667,7 +734,8 @@ class RepairService {
           finalRemarks ? finalRemarks.trim() : null,
           approvalStatus,
           approvalRequestedAt,
-          repairId
+          repairId,
+          durationStr
         ]
       );
 
@@ -675,14 +743,18 @@ class RepairService {
       await client.query(
         `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
          VALUES ($1, $2, $3, $4, $5)`,
-        [repairId, newStatus, updateNote.trim(), user.id, user.name]
+        [repairId, newStatus, finalNote, validUserId, user?.name || 'Technician']
       );
 
       // Recalculate linked invoice
       await RepairService.syncLinkedInvoice(repairId, client);
 
       const updatedJob = updateRes.rows[0];
-      await RepairService.sendAutomatedWhatsapp(updatedJob, finalRemarks || updateNote, client);
+      if (newStatus === 'Waiting for Customer Approval') {
+        await RepairService.sendAutomatedWhatsapp(updatedJob, '', client, { templateType: 'approval_request' });
+      } else {
+        await RepairService.sendAutomatedWhatsapp(updatedJob, finalRemarks || finalNote, client);
+      }
 
       emitEvent('repair.updated', updatedJob);
 
@@ -691,9 +763,9 @@ class RepairService {
   }
 
   /**
-   * Approve Diagnosis Job Quotation
+   * Approve Diagnosis Job Quotation (Atomic & Idempotent)
    */
-  static async approveQuote(repairId, user) {
+  static async approveQuote(repairId, user, approvalSource = 'Admin') {
     return await db.withTransaction(async (client) => {
       const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1 FOR UPDATE', [repairId]);
       if (jobRes.rows.length === 0) {
@@ -702,7 +774,31 @@ class RepairService {
         throw error;
       }
       const job = jobRes.rows[0];
+
+      // Idempotency: Reject if already resolved
+      if (job.approval_status === 'Approved') {
+        const error = new Error('This quotation has already been approved.');
+        error.status = 400;
+        throw error;
+      }
+      if (job.approval_status === 'Declined') {
+        const error = new Error('This quotation has already been declined.');
+        error.status = 400;
+        throw error;
+      }
+      if (job.status !== 'Waiting for Customer Approval' && job.approval_status !== 'Pending') {
+        const error = new Error('Repair job is not in a pending approval state.');
+        error.status = 400;
+        throw error;
+      }
+
       const quoteAmt = parseFloat(job.quotation_amount || 0);
+
+      let validUserId = null;
+      if (user?.id) {
+        const uCheck = await client.query('SELECT id FROM users WHERE id = $1', [user.id]);
+        if (uCheck.rows.length > 0) validUserId = uCheck.rows[0].id;
+      }
 
       // Convert to active service job
       await client.query(
@@ -712,44 +808,68 @@ class RepairService {
           approval_status = 'Approved',
           approved_at = CURRENT_TIMESTAMP,
           approved_by = $1,
+          approval_source = $2,
           updated_at = CURRENT_TIMESTAMP
-         WHERE id = $2`,
-        [user?.name || 'Customer / Sales', repairId]
+         WHERE id = $3`,
+        [user?.name || approvalSource || 'Customer', approvalSource, repairId]
       );
 
       // Add approved repair line if quotation amount > 0
       if (quoteAmt > 0) {
-        const checkLine = await client.query('SELECT id FROM repair_job_lines WHERE repair_job_id = $1 AND (is_approved_repair_line = TRUE OR line_type = $2)', [repairId, 'approved_repair']);
+        const checkLine = await client.query(
+          'SELECT id FROM repair_job_lines WHERE repair_job_id = $1 AND (is_approved_repair_line = TRUE OR line_type = $2)',
+          [repairId, 'approved_repair']
+        );
         if (checkLine.rows.length === 0) {
           await client.query(
-            `INSERT INTO repair_job_lines (repair_job_id, name, catalog_price_snapshot, charges, quantity, duration, condition, line_type, is_approved_repair_line)
-             VALUES ($1, $2, $3, $3, 1, $4, 'Approved repair service after diagnosis', 'approved_repair', TRUE)`,
+            `INSERT INTO repair_job_lines (
+              repair_job_id, name, catalog_price_snapshot, charges, quantity, duration, condition, line_type, is_approved_repair_line
+            ) VALUES ($1, $2, $3, $3, 1, $4, 'Approved repair service after diagnosis', 'approved_repair', TRUE)`,
             [repairId, job.recommended_solution || 'Approved Repair Work', quoteAmt, job.duration || '1-2 Days']
           );
         }
       }
 
+      // Log status history
       await client.query(
         `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
-         VALUES ($1, 'Repair Approved', 'Customer approved the quotation. Hardware repair work may now proceed.', $2, $3)`,
-        [repairId, user?.id || null, user?.name || 'Customer']
+         VALUES ($1, 'Repair Approved', $2, $3, $4)`,
+        [
+          repairId,
+          `Repair quotation approved via ${approvalSource}: ${job.recommended_solution || 'Repair Work'} (PKR ${quoteAmt.toFixed(2)}). Hardware repair work may now proceed.`,
+          validUserId,
+          user?.name || approvalSource
+        ]
       );
 
+      // Clear WhatsApp bot state
+      const cleanContact = String(job.contact || '').trim();
+      if (cleanContact) {
+        await client.query(
+          `UPDATE whatsapp_conversations 
+           SET bot_state = NULL, approval_tracking_id = NULL, updated_at = CURRENT_TIMESTAMP 
+           WHERE contact = $1`,
+          [cleanContact]
+        );
+      }
+
+      // Sync linked invoice & balances atomically
       await RepairService.syncLinkedInvoice(repairId, client);
 
       const refreshed = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
-      await RepairService.sendAutomatedWhatsapp(refreshed.rows[0], 'Quotation approved. Repair work has been queued on the technician workbench.', client);
+      await RepairService.sendAutomatedWhatsapp(refreshed.rows[0], '', client, { templateType: 'approval_confirmed' });
 
       emitEvent('repair.updated', refreshed.rows[0]);
+      emitEvent('repair.approved', refreshed.rows[0]);
 
       return refreshed.rows[0];
     });
   }
 
   /**
-   * Decline Diagnosis Job Quotation
+   * Decline Diagnosis Job Quotation (Atomic & Idempotent)
    */
-  static async declineQuote(repairId, user) {
+  static async declineQuote(repairId, user, approvalSource = 'Admin') {
     return await db.withTransaction(async (client) => {
       const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1 FOR UPDATE', [repairId]);
       if (jobRes.rows.length === 0) {
@@ -757,28 +877,71 @@ class RepairService {
         error.status = 404;
         throw error;
       }
+      const job = jobRes.rows[0];
+
+      // Idempotency: Reject if already resolved
+      if (job.approval_status === 'Declined') {
+        const error = new Error('This quotation has already been declined.');
+        error.status = 400;
+        throw error;
+      }
+      if (job.approval_status === 'Approved') {
+        const error = new Error('This quotation has already been approved.');
+        error.status = 400;
+        throw error;
+      }
+      if (job.status !== 'Waiting for Customer Approval' && job.approval_status !== 'Pending') {
+        const error = new Error('Repair job is not in a pending approval state.');
+        error.status = 400;
+        throw error;
+      }
+
+      let validUserId = null;
+      if (user?.id) {
+        const uCheck = await client.query('SELECT id FROM users WHERE id = $1', [user.id]);
+        if (uCheck.rows.length > 0) validUserId = uCheck.rows[0].id;
+      }
 
       await client.query(
         `UPDATE repair_jobs SET
           status = 'Repair Declined',
           approval_status = 'Declined',
+          approval_source = $1,
+          declined_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1`,
-        [repairId]
+         WHERE id = $2`,
+        [approvalSource, repairId]
       );
 
       await client.query(
         `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
-         VALUES ($1, 'Repair Declined', 'Customer declined the repair quotation. Only diagnostic inspection charges apply.', $2, $3)`,
-        [repairId, user?.id || null, user?.name || 'Customer']
+         VALUES ($1, 'Repair Declined', $2, $3, $4)`,
+        [
+          repairId,
+          `Repair quotation declined via ${approvalSource}. Only diagnostic inspection charges (if applicable) apply.`,
+          validUserId,
+          user?.name || approvalSource
+        ]
       );
+
+      // Clear WhatsApp bot state
+      const cleanContact = String(job.contact || '').trim();
+      if (cleanContact) {
+        await client.query(
+          `UPDATE whatsapp_conversations 
+           SET bot_state = NULL, approval_tracking_id = NULL, updated_at = CURRENT_TIMESTAMP 
+           WHERE contact = $1`,
+          [cleanContact]
+        );
+      }
 
       await RepairService.syncLinkedInvoice(repairId, client);
 
       const refreshed = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
-      await RepairService.sendAutomatedWhatsapp(refreshed.rows[0], 'Repair quote was declined. The device is assembled and ready for counter collection after diagnosis fee.', client);
+      await RepairService.sendAutomatedWhatsapp(refreshed.rows[0], '', client, { templateType: 'decline_confirmed' });
 
       emitEvent('repair.updated', refreshed.rows[0]);
+      emitEvent('repair.declined', refreshed.rows[0]);
 
       return refreshed.rows[0];
     });
@@ -789,6 +952,15 @@ class RepairService {
    */
   static async collectPayment(repairId, paymentData, user) {
     return await db.withTransaction(async (client) => {
+      const { amount, paymentMethod, reference, date, note } = paymentData;
+      const payAmount = parseFloat(amount || 0);
+
+      if (payAmount <= 0) {
+        const error = new Error('Payment amount must be greater than zero.');
+        error.status = 400;
+        throw error;
+      }
+
       const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1 FOR UPDATE', [repairId]);
       if (jobRes.rows.length === 0) {
         const error = new Error('Repair job not found.');
@@ -796,28 +968,18 @@ class RepairService {
         throw error;
       }
       const job = jobRes.rows[0];
-
-      const { amount: reqAmt, paymentMethod, reference, note, date } = paymentData;
-      const payAmount = parseFloat(reqAmt || 0);
       const remaining = Math.max(0, parseFloat(job.total || 0) - parseFloat(job.paid || 0));
 
-      if (payAmount <= 0 || payAmount > remaining + 0.005) {
-        const error = new Error(`Payment amount must be between PKR 1 and remaining balance of PKR ${remaining.toFixed(2)}.`);
+      if (payAmount > remaining + 0.005) {
+        const error = new Error(`Payment amount (PKR ${payAmount.toFixed(2)}) cannot exceed remaining balance (PKR ${remaining.toFixed(2)}).`);
         error.status = 400;
         throw error;
       }
 
       const pMethod = paymentMethod || 'Cash';
-      const newPaid = parseFloat(job.paid || 0) + payAmount;
-      const newRemaining = Math.max(0, parseFloat(job.total || 0) - newPaid);
-
-      await client.query(
-        `UPDATE repair_jobs SET paid = $1, payment_method = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3`,
-        [newPaid, pMethod, repairId]
-      );
-
-      // Record payment
       const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
+
+      // 1. Record in payments table
       await client.query(
         `INSERT INTO payments (
           id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
@@ -834,6 +996,14 @@ class RepairService {
         ]
       );
 
+      const newPaid = parseFloat(job.paid || 0) + payAmount;
+      const newRemaining = Math.max(0, parseFloat(job.total || 0) - newPaid);
+
+      await client.query(
+        `UPDATE repair_jobs SET paid = $1, payment_method = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3`,
+        [newPaid, pMethod, repairId]
+      );
+
       // Log history
       await client.query(
         `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
@@ -848,7 +1018,11 @@ class RepairService {
       await RepairService.syncLinkedInvoice(repairId, client);
 
       const refreshed = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
-      await RepairService.sendAutomatedWhatsapp(refreshed.rows[0], `Payment received: PKR ${payAmount.toFixed(2)}. Remaining balance: PKR ${newRemaining.toFixed(2)}.`, client);
+      await RepairService.sendAutomatedWhatsapp(refreshed.rows[0], '', client, {
+        templateType: 'payment_receipt',
+        amountPaid: payAmount,
+        newBalance: newRemaining
+      });
 
       emitEvent('repair.updated', refreshed.rows[0]);
 
@@ -915,7 +1089,7 @@ class RepairService {
       await RepairService.syncLinkedInvoice(repairId, client);
 
       const refreshed = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
-      await RepairService.sendAutomatedWhatsapp(refreshed.rows[0], 'Product delivered and repair job successfully closed. Thank you!', client);
+      await RepairService.sendAutomatedWhatsapp(refreshed.rows[0], '', client, { templateType: 'delivery_closed' });
 
       emitEvent('repair.updated', refreshed.rows[0]);
 
@@ -992,6 +1166,24 @@ class RepairService {
             qty, charge, parseFloat(part.cost_price || 0), user?.id || null, user?.name || 'Technician'
           ]
         );
+
+        // Log in repair_parts_movements
+        try {
+          await client.query(
+            `INSERT INTO repair_parts_movements (
+              part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, balance_after, performed_by, performed_by_name
+            ) VALUES ($1, $2, $3, 'OUT', $4, $5, 'Repair Job Issuance', $6, $7, $8, $9)`,
+            [
+              part.id, part.code, part.name, qty,
+              `Issued to repair job ${job.id} (${job.customer_name})`,
+              job.id,
+              Math.max(0, parseInt(part.current_stock || 0, 10) - qty),
+              user?.id || null, user?.name || 'Technician'
+            ]
+          );
+        } catch (mErr) {
+          console.error('[Spare Parts Movement] Issuance log error:', mErr.message);
+        }
 
         await client.query(
           `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
@@ -1158,6 +1350,22 @@ class RepairService {
           'UPDATE repair_parts SET current_stock = current_stock + $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
           [returnQty, used.part_id]
         );
+
+        try {
+          await client.query(
+            `INSERT INTO repair_parts_movements (
+              part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, performed_by, performed_by_name
+            ) VALUES ($1, $2, $3, 'IN', $4, $5, 'Repair Job Return', $6, $7, $8)`,
+            [
+              used.part_id, used.product_code, used.name, returnQty,
+              `Returned from repair job ${repairId}`,
+              repairId,
+              user?.id || null, user?.name || 'Technician'
+            ]
+          );
+        } catch (mErr) {
+          console.error('[Spare Parts Movement] Return log error:', mErr.message);
+        }
       } else if (used.product_id) {
         await InventoryService.adjustStock({
           productId: used.product_id,
@@ -1324,6 +1532,569 @@ class RepairService {
         notes: p.notes
       }))
     };
+  }
+
+  /**
+   * Add an additional service line to an existing repair job
+   */
+  static async addServiceLine(repairId, lineData, user) {
+    return await db.withTransaction(async (client) => {
+      const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1 FOR UPDATE', [repairId]);
+      if (jobRes.rows.length === 0) {
+        const error = new Error('Repair job not found.');
+        error.status = 404;
+        throw error;
+      }
+      const job = jobRes.rows[0];
+
+      const { serviceId, name, charges, quantity, duration, condition } = lineData;
+      let lineName = (name || '').trim();
+      let unitCharge = parseFloat(charges !== undefined && charges !== null ? charges : 0);
+      let qty = parseInt(quantity || 1, 10);
+      let catalogPrice = unitCharge;
+
+      if (serviceId) {
+        const srvRes = await client.query('SELECT name, charges, duration FROM repair_services WHERE id = $1', [serviceId]);
+        if (srvRes.rows.length > 0) {
+          if (!lineName) lineName = srvRes.rows[0].name;
+          catalogPrice = parseFloat(srvRes.rows[0].charges || 0);
+          if (isNaN(unitCharge) || unitCharge === 0) unitCharge = catalogPrice;
+        }
+      }
+
+      if (!lineName) {
+        const error = new Error('Service name is required.');
+        error.status = 400;
+        throw error;
+      }
+      if (isNaN(unitCharge) || unitCharge < 0) unitCharge = 0;
+      if (isNaN(qty) || qty <= 0) qty = 1;
+
+      const insRes = await client.query(
+        `INSERT INTO repair_job_lines (
+          repair_job_id, service_id, name, catalog_price_snapshot, charges, quantity, duration, condition, line_type
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'repair')
+        RETURNING *`,
+        [
+          repairId,
+          serviceId || null,
+          lineName,
+          catalogPrice,
+          unitCharge,
+          qty,
+          (duration || '').trim(),
+          (condition || '').trim()
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          repairId,
+          job.status,
+          `Additional service added: ${lineName} (Charge: PKR ${unitCharge.toFixed(2)}, Qty: ${qty})`,
+          user?.id || null,
+          user?.name || 'Technician'
+        ]
+      );
+
+      await RepairService.syncLinkedInvoice(repairId, client);
+
+      const refreshed = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
+      emitEvent('repair.updated', refreshed.rows[0]);
+
+      return {
+        job: refreshed.rows[0],
+        line: insRes.rows[0]
+      };
+    });
+  }
+
+  /**
+   * Remove a service line from a repair job
+   */
+  static async removeServiceLine(repairId, lineId, user) {
+    return await db.withTransaction(async (client) => {
+      const lineRes = await client.query(
+        'SELECT * FROM repair_job_lines WHERE id = $1 AND repair_job_id = $2 FOR UPDATE',
+        [lineId, repairId]
+      );
+      if (lineRes.rows.length === 0) {
+        const error = new Error('Service line not found on this repair job.');
+        error.status = 404;
+        throw error;
+      }
+      const line = lineRes.rows[0];
+
+      await client.query('DELETE FROM repair_job_lines WHERE id = $1', [lineId]);
+
+      const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
+      await client.query(
+        `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          repairId,
+          jobRes.rows[0].status,
+          `Service line removed: ${line.name}`,
+          user?.id || null,
+          user?.name || 'Technician'
+        ]
+      );
+
+      await RepairService.syncLinkedInvoice(repairId, client);
+
+      const refreshed = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
+      emitEvent('repair.updated', refreshed.rows[0]);
+
+      return refreshed.rows[0];
+    });
+  }
+
+  /**
+   * Create an Additional Work Request for a Service Job
+   */
+  static async createAdditionalWorkRequest(repairId, requestData, user) {
+    return await db.withTransaction(async (client) => {
+      const {
+        faultFinding,
+        recommendedService,
+        serviceCharge,
+        partsCharge,
+        customerSafeNote,
+        parts
+      } = requestData;
+
+      if (!faultFinding || !recommendedService) {
+        const error = new Error('Fault finding and recommended service are required.');
+        error.status = 400;
+        throw error;
+      }
+
+      const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1 FOR UPDATE', [repairId]);
+      if (jobRes.rows.length === 0) {
+        const error = new Error('Repair job not found.');
+        error.status = 404;
+        throw error;
+      }
+      const job = jobRes.rows[0];
+
+      const sCharge = parseFloat(serviceCharge || 0);
+      const pCharge = parseFloat(partsCharge || 0);
+      const totalQuotation = sCharge + pCharge;
+
+      const reqId = await getNextEntityId('repair_additional_work_requests', 'id', 'AWR', 4, client);
+      const partsPayload = Array.isArray(parts) ? parts : [];
+
+      const snapshot = {
+        faultFinding: faultFinding.trim(),
+        recommendedService: recommendedService.trim(),
+        serviceCharge: sCharge,
+        partsCharge: pCharge,
+        totalQuotation,
+        customerSafeNote: customerSafeNote ? customerSafeNote.trim() : '',
+        parts: partsPayload,
+        createdAt: new Date().toISOString()
+      };
+
+      let validUserId = null;
+      if (user?.id) {
+        const uCheck = await client.query('SELECT id FROM users WHERE id = $1', [user.id]);
+        if (uCheck.rows.length > 0) validUserId = uCheck.rows[0].id;
+      }
+
+      const insRes = await client.query(
+        `INSERT INTO repair_additional_work_requests (
+          id, repair_job_id, tracking_id, fault_finding, recommended_service,
+          service_charge, parts_charge, total_quotation, customer_safe_note,
+          parts_payload, status, quotation_snapshot, created_by, created_by_name
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Pending Approval', $11, $12, $13)
+        RETURNING *`,
+        [
+          reqId, repairId, job.tracking_id, faultFinding.trim(), recommendedService.trim(),
+          sCharge, pCharge, totalQuotation, customerSafeNote ? customerSafeNote.trim() : null,
+          JSON.stringify(partsPayload), JSON.stringify(snapshot), validUserId, user?.name || 'Technician'
+        ]
+      );
+
+      const createdRequest = insRes.rows[0];
+
+      // Set WhatsApp conversation state for approval lookup
+      const cleanContact = String(job.contact || '').trim();
+      if (cleanContact) {
+        const convRes = await client.query('SELECT id FROM whatsapp_conversations WHERE contact = $1', [cleanContact]);
+        let convId = null;
+        if (convRes.rows.length > 0) {
+          convId = convRes.rows[0].id;
+        } else {
+          convId = await getNextEntityId('whatsapp_conversations', 'id', 'CONV', 4, client);
+          await client.query(
+            `INSERT INTO whatsapp_conversations (id, contact, name, status, lead_type)
+             VALUES ($1, $2, $3, 'Bot Active', 'Repair Notification')`,
+            [convId, cleanContact, job.customer_name]
+          );
+        }
+
+        await client.query(
+          `UPDATE whatsapp_conversations 
+           SET bot_state = 'additional_work_approval', approval_tracking_id = $1, updated_at = CURRENT_TIMESTAMP 
+           WHERE id = $2`,
+          [job.tracking_id, convId]
+        );
+
+        // Send WhatsApp approval notification
+        const approvalMsg = buildAdditionalWorkApprovalTemplate({
+          job,
+          workRequest: createdRequest
+        });
+
+        await client.query(
+          `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag)
+           VALUES ($1, 'out', $2, 'approval_request')`,
+          [convId, approvalMsg]
+        );
+
+        await client.query(
+          `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+          [approvalMsg, convId]
+        );
+
+        emitEvent('whatsapp.message_added', { conversationId: convId, text: approvalMsg });
+      }
+
+      // Log in repair status history
+      await client.query(
+        `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          repairId,
+          job.status,
+          `Additional fault discovered: ${faultFinding.trim()}. Additional work quote: PKR ${totalQuotation.toFixed(2)} sent for customer approval.`,
+          validUserId,
+          user?.name || 'Technician'
+        ]
+      );
+
+      emitEvent('repair.additional_work_created', { repairId, request: createdRequest });
+      emitEvent('repair.updated', job);
+
+      return createdRequest;
+    });
+  }
+
+  /**
+   * Get all Additional Work Requests for a Repair Job
+   */
+  static async getAdditionalWorkRequests(repairId) {
+    const res = await db.query(
+      `SELECT * FROM repair_additional_work_requests 
+       WHERE repair_job_id = $1 
+       ORDER BY created_at DESC`,
+      [repairId]
+    );
+    return res.rows;
+  }
+
+  /**
+   * Approve an Additional Work Request (Idempotent)
+   */
+  static async approveAdditionalWorkRequest(repairId, requestId, user, approvalSource = 'Admin', customerResponse = null) {
+    return await db.withTransaction(async (client) => {
+      const reqRes = await client.query(
+        `SELECT * FROM repair_additional_work_requests 
+         WHERE id = $1 AND repair_job_id = $2 FOR UPDATE`,
+        [requestId, repairId]
+      );
+      if (reqRes.rows.length === 0) {
+        const error = new Error('Additional work request not found.');
+        error.status = 404;
+        throw error;
+      }
+      const workRequest = reqRes.rows[0];
+
+      // Idempotency: Reject if already approved or declined
+      if (workRequest.status !== 'Pending Approval') {
+        const error = new Error(`This additional work request has already been ${workRequest.status.toLowerCase()}.`);
+        error.status = 400;
+        throw error;
+      }
+
+      const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1 FOR UPDATE', [repairId]);
+      if (jobRes.rows.length === 0) {
+        const error = new Error('Repair job not found.');
+        error.status = 404;
+        throw error;
+      }
+      const job = jobRes.rows[0];
+
+      let validUserId = null;
+      if (user?.id) {
+        const uCheck = await client.query('SELECT id FROM users WHERE id = $1', [user.id]);
+        if (uCheck.rows.length > 0) validUserId = uCheck.rows[0].id;
+      }
+
+      // 1. Mark request as Approved
+      const updReq = await client.query(
+        `UPDATE repair_additional_work_requests SET
+          status = 'Approved',
+          approval_source = $1,
+          approved_by = $2,
+          approved_by_name = $3,
+          customer_response = $4,
+          approved_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+         WHERE id = $5
+         RETURNING *`,
+        [
+          approvalSource,
+          validUserId,
+          user?.name || approvalSource,
+          customerResponse || `Approved via ${approvalSource}`,
+          requestId
+        ]
+      );
+      const approvedRequest = updReq.rows[0];
+
+      // 2. Add approved service line into repair_job_lines
+      const serviceCharge = parseFloat(workRequest.service_charge || 0);
+      if (serviceCharge > 0 || workRequest.recommended_service) {
+        await client.query(
+          `INSERT INTO repair_job_lines (
+            repair_job_id, name, catalog_price_snapshot, charges, quantity, duration, condition, line_type, is_approved_repair_line
+          ) VALUES ($1, $2, $3, $3, 1, 'Approved Additional Service', $4, 'additional_approved', TRUE)`,
+          [
+            repairId,
+            workRequest.recommended_service || 'Approved Additional Service',
+            serviceCharge,
+            `Additional fault approval (${workRequest.fault_finding})`
+          ]
+        );
+      }
+
+      // 3. Issue and consume parts if included in parts_payload
+      let partsList = [];
+      try {
+        partsList = Array.isArray(workRequest.parts_payload)
+          ? workRequest.parts_payload
+          : JSON.parse(workRequest.parts_payload || '[]');
+      } catch (e) {
+        partsList = [];
+      }
+
+      for (const partItem of partsList) {
+        if (!partItem.partId) continue;
+        const partRes = await client.query('SELECT * FROM repair_parts WHERE id = $1 FOR UPDATE', [partItem.partId]);
+        if (partRes.rows.length > 0) {
+          const partObj = partRes.rows[0];
+          const qty = parseInt(partItem.quantity || 1, 10);
+          const sellingPrice = parseFloat(partItem.sellingPrice || partObj.selling_price || 0);
+          const costPrice = parseFloat(partObj.cost_price || 0);
+
+          // Deduct stock
+          const newStock = Math.max(0, partObj.current_stock - qty);
+          await client.query('UPDATE repair_parts SET current_stock = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newStock, partObj.id]);
+
+          // Record in repair_parts_used
+          await client.query(
+            `INSERT INTO repair_parts_used (
+              repair_job_id, part_id, product_code, name, quantity, customer_charge, cost_price_snapshot, added_by, added_by_name
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [
+              repairId, partObj.id, partObj.code, partObj.name, qty, sellingPrice, costPrice, validUserId, user?.name || approvalSource
+            ]
+          );
+
+          // Record inventory movement ledger
+          await client.query(
+            `INSERT INTO repair_parts_movements (
+              part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, balance_after, performed_by, performed_by_name
+            ) VALUES ($1, $2, $3, 'OUT', $4, $5, 'Additional Repair Job Usage', $6, $7, $8, $9)`,
+            [
+              partObj.id, partObj.code, partObj.name, qty,
+              `Consumed for repair ${job.tracking_id} via additional fault approval`,
+              job.tracking_id, newStock, validUserId, user?.name || approvalSource
+            ]
+          );
+        }
+      }
+
+      // 4. Atomically sync linked invoice & accounts
+      await RepairService.syncLinkedInvoice(repairId, client);
+
+      // 5. Log history
+      await client.query(
+        `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          repairId,
+          job.status,
+          `Additional work approved by ${approvalSource}: ${workRequest.recommended_service} (PKR ${parseFloat(workRequest.total_quotation || 0).toFixed(2)})`,
+          validUserId,
+          user?.name || approvalSource
+        ]
+      );
+
+      // 6. Clear WhatsApp approval bot state & send confirmation
+      const cleanContact = String(job.contact || '').trim();
+      if (cleanContact) {
+        await client.query(
+          `UPDATE whatsapp_conversations 
+           SET bot_state = NULL, approval_tracking_id = NULL, updated_at = CURRENT_TIMESTAMP 
+           WHERE contact = $1`,
+          [cleanContact]
+        );
+
+        const convRes = await client.query('SELECT id FROM whatsapp_conversations WHERE contact = $1', [cleanContact]);
+        if (convRes.rows.length > 0) {
+          const convId = convRes.rows[0].id;
+          const confMsg = buildAdditionalWorkApprovedTemplate({
+            job,
+            workRequest: approvedRequest
+          });
+
+          await client.query(
+            `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag)
+             VALUES ($1, 'out', $2, 'approval_confirmed')`,
+            [convId, confMsg]
+          );
+
+          await client.query(
+            `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+            [confMsg, convId]
+          );
+
+          emitEvent('whatsapp.message_added', { conversationId: convId, text: confMsg });
+        }
+      }
+
+      const refreshedJob = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [repairId]);
+
+      emitEvent('repair.additional_work_approved', { repairId, request: approvedRequest });
+      emitEvent('repair.updated', refreshedJob.rows[0]);
+
+      return {
+        success: true,
+        request: approvedRequest,
+        job: refreshedJob.rows[0]
+      };
+    });
+  }
+
+  /**
+   * Decline an Additional Work Request (Idempotent)
+   */
+  static async declineAdditionalWorkRequest(repairId, requestId, user, approvalSource = 'Admin', customerResponse = null) {
+    return await db.withTransaction(async (client) => {
+      const reqRes = await client.query(
+        `SELECT * FROM repair_additional_work_requests 
+         WHERE id = $1 AND repair_job_id = $2 FOR UPDATE`,
+        [requestId, repairId]
+      );
+      if (reqRes.rows.length === 0) {
+        const error = new Error('Additional work request not found.');
+        error.status = 404;
+        throw error;
+      }
+      const workRequest = reqRes.rows[0];
+
+      // Idempotency: Reject if already approved or declined
+      if (workRequest.status !== 'Pending Approval') {
+        const error = new Error(`This additional work request has already been ${workRequest.status.toLowerCase()}.`);
+        error.status = 400;
+        throw error;
+      }
+
+      const jobRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1 FOR UPDATE', [repairId]);
+      if (jobRes.rows.length === 0) {
+        const error = new Error('Repair job not found.');
+        error.status = 404;
+        throw error;
+      }
+      const job = jobRes.rows[0];
+
+      let validUserId = null;
+      if (user?.id) {
+        const uCheck = await client.query('SELECT id FROM users WHERE id = $1', [user.id]);
+        if (uCheck.rows.length > 0) validUserId = uCheck.rows[0].id;
+      }
+
+      // 1. Mark request as Declined
+      const updReq = await client.query(
+        `UPDATE repair_additional_work_requests SET
+          status = 'Declined',
+          approval_source = $1,
+          approved_by = $2,
+          approved_by_name = $3,
+          customer_response = $4,
+          declined_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+         WHERE id = $5
+         RETURNING *`,
+        [
+          approvalSource,
+          validUserId,
+          user?.name || approvalSource,
+          customerResponse || `Declined via ${approvalSource}`,
+          requestId
+        ]
+      );
+      const declinedRequest = updReq.rows[0];
+
+      // 2. Log history (no charges or parts added)
+      await client.query(
+        `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          repairId,
+          job.status,
+          `Additional work declined by ${approvalSource}: ${workRequest.recommended_service}. Original service job proceeds normally without extra charges.`,
+          validUserId,
+          user?.name || approvalSource
+        ]
+      );
+
+      // 3. Clear WhatsApp bot state & send decline confirmation
+      const cleanContact = String(job.contact || '').trim();
+      if (cleanContact) {
+        await client.query(
+          `UPDATE whatsapp_conversations 
+           SET bot_state = NULL, approval_tracking_id = NULL, updated_at = CURRENT_TIMESTAMP 
+           WHERE contact = $1`,
+          [cleanContact]
+        );
+
+        const convRes = await client.query('SELECT id FROM whatsapp_conversations WHERE contact = $1', [cleanContact]);
+        if (convRes.rows.length > 0) {
+          const convId = convRes.rows[0].id;
+          const declineMsg = buildAdditionalWorkDeclinedTemplate({
+            job,
+            workRequest: declinedRequest
+          });
+
+          await client.query(
+            `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag)
+             VALUES ($1, 'out', $2, 'approval_declined')`,
+            [convId, declineMsg]
+          );
+
+          await client.query(
+            `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+            [declineMsg, convId]
+          );
+
+          emitEvent('whatsapp.message_added', { conversationId: convId, text: declineMsg });
+        }
+      }
+
+      emitEvent('repair.additional_work_declined', { repairId, request: declinedRequest });
+      emitEvent('repair.updated', job);
+
+      return {
+        success: true,
+        request: declinedRequest,
+        job
+      };
+    });
   }
 }
 

@@ -3,6 +3,8 @@ const router = express.Router();
 const db = require('../../config/db');
 const { getNextEntityId } = require('../../utils/codeGenerator');
 const { emitEvent } = require('../../config/socket');
+const authenticateToken = require('../../middleware/auth');
+const { requireAdmin } = require('../../middleware/rbac');
 
 // GET /api/repair-parts - List repair spare parts
 router.get('/', async (req, res, next) => {
@@ -150,6 +152,21 @@ router.post('/', async (req, res, next) => {
     );
 
     const created = insertRes.rows[0];
+
+    // Log initial stock movement if stock > 0
+    if (numStock > 0) {
+      try {
+        await db.query(
+          `INSERT INTO repair_parts_movements (
+            part_id, part_code, part_name, direction, quantity, reason, reference_type, balance_after, performed_by, performed_by_name
+          ) VALUES ($1, $2, $3, 'IN', $4, 'Initial Catalog Stock Creation', 'Initial Setup', $4, $5, $6)`,
+          [created.id, created.code, created.name, numStock, req.user?.id || null, req.user?.name || 'Admin']
+        );
+      } catch (logErr) {
+        console.error('[Spare Parts Movement] Error logging initial stock:', logErr.message);
+      }
+    }
+
     emitEvent('repairPart.created', created);
 
     return res.status(201).json({
@@ -169,6 +186,42 @@ router.post('/', async (req, res, next) => {
         createdAt: created.created_at,
         updatedAt: created.updated_at
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/repair-parts/:id/history - Stock movement history for a spare part
+router.get('/:id/history', async (req, res, next) => {
+  try {
+    const partId = req.params.id;
+    const partRes = await db.query('SELECT * FROM repair_parts WHERE id = $1', [partId]);
+    if (partRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Repair spare part not found.' });
+    }
+
+    const movementsRes = await db.query(
+      `SELECT 
+        m.id,
+        m.created_at as date,
+        m.direction,
+        m.quantity,
+        (CASE WHEN m.direction = 'IN' THEN m.quantity ELSE -m.quantity END) as change_amount,
+        m.reason,
+        m.reference_type as ref_type,
+        m.reference_id as ref_id,
+        m.balance_after,
+        m.performed_by_name as created_by_name
+       FROM repair_parts_movements m
+       WHERE m.part_id = $1
+       ORDER BY m.created_at DESC`,
+      [partId]
+    );
+
+    return res.json({
+      success: true,
+      data: movementsRes.rows
     });
   } catch (error) {
     next(error);
@@ -268,9 +321,10 @@ router.patch('/:id/stock', async (req, res, next) => {
     const currentStock = parseInt(partRes.rows[0].current_stock || 0, 10);
 
     let newStock = currentStock;
-    if (direction === 'IN' || direction === 'add') {
+    const dirUpper = (direction || '').toUpperCase();
+    if (dirUpper === 'IN' || dirUpper === 'ADD') {
       newStock += qty;
-    } else if (direction === 'OUT' || direction === 'deduct') {
+    } else if (dirUpper === 'OUT' || dirUpper === 'DEDUCT') {
       if (qty > currentStock) {
         return res.status(400).json({ success: false, message: `Cannot deduct ${qty} units. Current stock is only ${currentStock}.` });
       }
@@ -285,6 +339,25 @@ router.patch('/:id/stock', async (req, res, next) => {
     );
 
     const updated = updateRes.rows[0];
+
+    // Log stock adjustment movement
+    try {
+      await db.query(
+        `INSERT INTO repair_parts_movements (
+          part_id, part_code, part_name, direction, quantity, reason, reference_type, balance_after, performed_by, performed_by_name
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'Stock Adjustment', $7, $8, $9)`,
+        [
+          updated.id, updated.code, updated.name, dirUpper, qty,
+          reason || (dirUpper === 'IN' ? 'Stock Added / Restocked' : 'Stock Deducted / Written off'),
+          newStock,
+          req.user?.id || null,
+          req.user?.name || 'Staff'
+        ]
+      );
+    } catch (logErr) {
+      console.error('[Spare Parts Movement] Error logging stock adjustment:', logErr.message);
+    }
+
     emitEvent('repairPart.updated', updated);
 
     return res.json({
@@ -325,32 +398,79 @@ router.patch('/:id/toggle', async (req, res, next) => {
   }
 });
 
-// DELETE /api/repair-parts/:id - Delete repair spare part
+// POST /api/repair-parts/bulk-delete - Bulk delete selected spare parts (Admin only)
+router.post('/bulk-delete', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'Please select at least one spare part to delete.' });
+    }
+
+    // Unlink from repair_parts_used so past jobs snapshot is safe
+    await db.query('UPDATE repair_parts_used SET part_id = NULL WHERE part_id = ANY($1::varchar[])', [ids]);
+    // Delete associated movements
+    await db.query('DELETE FROM repair_parts_movements WHERE part_id = ANY($1::varchar[])', [ids]);
+    // Delete spare parts
+    const delRes = await db.query('DELETE FROM repair_parts WHERE id = ANY($1::varchar[]) RETURNING id', [ids]);
+
+    emitEvent('repairPart.bulkDeleted', { ids });
+
+    return res.json({
+      success: true,
+      message: `${delRes.rowCount || 0} spare parts deleted successfully.`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/repair-parts/all/wipe - Delete ALL spare parts (Admin only)
+router.delete('/all/wipe', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    // Unlink from repair_parts_used
+    await db.query('UPDATE repair_parts_used SET part_id = NULL');
+    // Truncate spare parts movements
+    await db.query('TRUNCATE TABLE repair_parts_movements CASCADE');
+    // Delete all spare parts
+    const delRes = await db.query('DELETE FROM repair_parts RETURNING id');
+
+    emitEvent('repairPart.allDeleted', {});
+
+    return res.json({
+      success: true,
+      message: `All ${delRes.rowCount || 0} spare parts have been deleted from catalog.`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/repair-parts/:id - Delete single repair spare part
 router.delete('/:id', async (req, res, next) => {
   try {
     const partId = req.params.id;
 
-    // Check if referenced in repair_parts_used
-    const usedRes = await db.query('SELECT COUNT(*) FROM repair_parts_used WHERE part_id = $1', [partId]);
-    const usedCount = parseInt(usedRes.rows[0].count, 10);
-
-    if (usedCount > 0) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot delete spare part because it is recorded in ${usedCount} repair job history log(s). You can mark it Inactive instead.`
-      });
-    }
-
-    const delRes = await db.query('DELETE FROM repair_parts WHERE id = $1 RETURNING *', [partId]);
-    if (delRes.rows.length === 0) {
+    const partRes = await db.query('SELECT * FROM repair_parts WHERE id = $1', [partId]);
+    if (partRes.rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Repair spare part not found.' });
     }
+
+    const partName = partRes.rows[0].name;
+
+    // Unlink from repair_parts_used so job history snapshot remains intact
+    await db.query('UPDATE repair_parts_used SET part_id = NULL WHERE part_id = $1', [partId]);
+
+    // Delete movements
+    await db.query('DELETE FROM repair_parts_movements WHERE part_id = $1', [partId]);
+
+    // Delete the part
+    await db.query('DELETE FROM repair_parts WHERE id = $1', [partId]);
 
     emitEvent('repairPart.deleted', { id: partId });
 
     return res.json({
       success: true,
-      message: `Spare part "${delRes.rows[0].name}" deleted successfully.`
+      message: `Spare part "${partName}" deleted successfully.`
     });
   } catch (error) {
     next(error);

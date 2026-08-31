@@ -6,117 +6,15 @@ const { requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
 const { emitEvent } = require('../../config/socket');
 const RepairService = require('../repairs/repairs.service');
+const {
+  buildTrackingResponseTemplate,
+  buildApprovalConfirmationTemplate,
+  buildDeclineConfirmationTemplate,
+  buildAdditionalWorkApprovedTemplate,
+  buildAdditionalWorkDeclinedTemplate
+} = require('./whatsapp.templates');
 
 router.use(authenticateToken);
-
-// Rich Repair Status Report Generator
-function formatRepairStatusReport(job) {
-  const total = parseFloat(job.total || 0);
-  const paid = parseFloat(job.paid || 0);
-  const remaining = Math.max(0, total - paid);
-  const payStatus = remaining <= 0.005 ? '✅ Paid in Full' : paid > 0 ? '⚠️ Partial Advance' : '❌ Unpaid';
-  const expected = job.expected_completion
-    ? new Date(job.expected_completion).toLocaleDateString('en-PK', { year: 'numeric', month: 'short', day: '2-digit' })
-    : (job.duration || 'Under Diagnostic Review');
-
-  const status = job.status || 'Received';
-  let statusBadge = `🛠️ ${status}`;
-  let statusExplanation = 'Device is currently being processed by our technical department.';
-
-  if (['Job Received', 'Received'].includes(status)) {
-    statusBadge = '📥 Received at Repair Desk';
-    statusExplanation = 'Your device has been logged into our queue. It will shortly be inspected by our hardware technicians.';
-  } else if (status === 'Diagnosis Received') {
-    statusBadge = '📥 Received for Technical Inspection';
-    statusExplanation = 'Device logged for root-cause fault diagnosis and cost estimation.';
-  } else if (['Diagnosis in Progress', 'Under Diagnosis', 'Checking'].includes(status)) {
-    statusBadge = '🔬 Diagnosis In Progress (Checking)';
-    statusExplanation = 'Technician is actively testing motherboard power rails, display lines, and components.';
-  } else if (status === 'Diagnosis Completed') {
-    statusBadge = '🔬 Diagnosis Completed';
-    statusExplanation = 'Hardware fault diagnosed. Repair quotation and required parts are ready.';
-  } else if (status === 'Waiting for Customer Approval') {
-    statusBadge = '⏳ Waiting for Customer Approval';
-    statusExplanation = `Estimated repair cost: PKR ${parseFloat(job.quotation_amount || job.total || 0).toLocaleString('en-PK')}. Reply APPROVE (or 1) to proceed, or DECLINE (or 2).`;
-  } else if (status === 'Repair Approved') {
-    statusBadge = '⚙️ Repair Approved';
-    statusExplanation = 'Quotation approved! Device has been queued on the technician workstation for repair work.';
-  } else if (status === 'Work in Progress') {
-    const progress = job.work_progress ? `${job.work_progress}%` : 'In Progress';
-    statusBadge = `⚙️ Work in Progress (${progress} Done)`;
-    statusExplanation = 'Technician is actively performing component-level soldering, IC replacement, or board repair.';
-  } else if (status === 'Waiting for Parts') {
-    statusBadge = '📦 Waiting for Spare Parts';
-    statusExplanation = 'Required replacement chip / screen / part has been ordered and will be fitted upon arrival.';
-  } else if (['Testing & Quality Check', 'Testing'].includes(status)) {
-    statusBadge = '🧪 Repair Done — Under Quality Testing';
-    statusExplanation = 'Repair is finished! Device is currently undergoing thermal burn-in and multi-point QC testing.';
-  } else if (['Work Completed', 'Ready for Delivery', 'Done'].includes(status)) {
-    statusBadge = '✅ REPAIR COMPLETED (Ready for Pickup!)';
-    statusExplanation = 'Good news! Your laptop repair is completed and verified. You can visit our shop to collect your device.';
-  } else if (['Delivered & Closed', 'Delivered'].includes(status)) {
-    statusBadge = '📦 Delivered & Closed';
-    statusExplanation = 'Device has been collected and handed over to the customer.';
-  } else if (['Repair Declined', 'Returned Without Repair', 'Cancelled'].includes(status)) {
-    statusBadge = '❌ Repair Declined / Cancelled';
-    statusExplanation = 'Repair was cancelled/declined. Device is packed and ready for return at the counter.';
-  }
-
-  const device = [job.brand, job.model || job.product_name].filter(Boolean).join(' ') || job.product_type || 'Laptop/Device';
-  const typeTag = job.product_type ? `(${job.product_type})` : '';
-
-  const lines = [
-    `*━━━━━━━━━━━━━━━━━━━━━*`,
-    `🔧 *LAPTOP REPAIR STATUS REPORT*`,
-    `*━━━━━━━━━━━━━━━━━━━━━*`,
-    `📌 *Tracking ID:* ${job.tracking_id}  *(Ref: ${job.id})*`,
-    `💻 *Device:* ${device} ${typeTag}`,
-    `👤 *Customer:* ${job.customer_name || 'Customer'}`,
-    `⚡ *Reported Problem:* ${job.problem || 'Hardware fault'}`,
-    `📊 *Live Status:* ${statusBadge}`,
-    `ℹ️ *Details:* ${statusExplanation}`,
-  ];
-
-  if (job.diagnosed_issue) {
-    lines.push(`🔬 *Diagnosed Issue:* ${job.diagnosed_issue}`);
-  }
-  if (job.recommended_solution) {
-    lines.push(`💡 *Solution / Work Done:* ${job.recommended_solution}`);
-  }
-  if (job.final_remarks) {
-    lines.push(`📝 *Tech Note:* ${job.final_remarks}`);
-  }
-
-  lines.push(`👨‍🔧 *Assigned Technician:* ${job.technician_name || 'Senior Hardware Specialist'}`);
-  lines.push(`📅 *Expected Delivery:* ${expected}`);
-
-  if (job.work_progress > 0) {
-    lines.push(`📈 *Bench Progress:* ${job.work_progress}%`);
-  }
-
-  lines.push(`*─────────────────────*`);
-  lines.push(`💰 *Billing & Payment:*`);
-  lines.push(`   • Total Bill: PKR ${total.toLocaleString('en-PK', { maximumFractionDigits: 2 })}`);
-  lines.push(`   • Advance Paid: PKR ${paid.toLocaleString('en-PK', { maximumFractionDigits: 2 })}`);
-  lines.push(`   • Balance Due: PKR ${remaining.toLocaleString('en-PK', { maximumFractionDigits: 2 })} (${payStatus})`);
-
-  if (job.warranty_days > 0) {
-    lines.push(`🛡️ *Warranty:* ${job.warranty_days} Days Service Warranty`);
-  }
-
-  lines.push(`*━━━━━━━━━━━━━━━━━━━━━*`);
-
-  if (['Work Completed', 'Ready for Delivery', 'Done'].includes(status)) {
-    lines.push(`🎉 *Your device is ready for collection!* Please bring your tracking ID (*${job.tracking_id}*) or contact number.`);
-  } else if (status === 'Waiting for Customer Approval') {
-    lines.push(`👉 *Reply 1 or APPROVE to proceed with repair.*`);
-    lines.push(`👉 *Reply 2 or DECLINE to cancel.*`);
-  } else {
-    lines.push(`💬 *Reply 6 to speak with a human support agent.*`);
-  }
-
-  return lines.join('\n');
-}
 
 // Smart Repair Job Lookup
 async function findRepairJob(queryStr, contact, client = db) {
@@ -187,12 +85,73 @@ async function processBotReply(input, conv, client = db) {
   const isApproveCmd = /^(?:1|approve|approved|proceed|yes|haan|ok)\b/i.test(t) || t.startsWith('approve');
   const isDeclineCmd = /^(?:2|decline|declined|cancel|no|nahi)\b/i.test(t) || t.startsWith('decline');
 
-  if (isApproveCmd || isDeclineCmd || (conv.bot_state === 'repair_approval' && conv.approval_tracking_id)) {
+  if (isApproveCmd || isDeclineCmd || conv.bot_state === 'additional_work_approval' || conv.bot_state === 'repair_approval') {
     let targetTrackingId = conv.approval_tracking_id;
     // Check if tracking ID was typed along with command e.g. "APPROVE RPR-00001"
     const matchedTrack = raw.match(/(?:RPR|REP)[- ]?[0-9]+/i);
     if (matchedTrack) targetTrackingId = matchedTrack[0];
 
+    // Priority A: Check for Active Pending Additional Work Request
+    let pendingWorkReq = null;
+    let jobForWorkReq = null;
+
+    if (targetTrackingId) {
+      const wrRes = await client.query(
+        `SELECT * FROM repair_additional_work_requests 
+         WHERE UPPER(tracking_id) = UPPER($1) AND status = 'Pending Approval' 
+         ORDER BY created_at DESC LIMIT 1`,
+        [targetTrackingId]
+      );
+      if (wrRes.rows.length > 0) {
+        pendingWorkReq = wrRes.rows[0];
+        const jRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [pendingWorkReq.repair_job_id]);
+        if (jRes.rows.length > 0) jobForWorkReq = jRes.rows[0];
+      }
+    }
+
+    if (!pendingWorkReq && conv.contact) {
+      const cleanPhone = String(conv.contact).replace(/[^0-9]/g, '');
+      const wrRes = await client.query(
+        `SELECT awr.* FROM repair_additional_work_requests awr
+         JOIN repair_jobs rj ON awr.repair_job_id = rj.id
+         WHERE (rj.contact LIKE $1 OR rj.contact LIKE $2) AND awr.status = 'Pending Approval'
+         ORDER BY awr.created_at DESC LIMIT 1`,
+        [`%${cleanPhone}%`, `%${cleanPhone.slice(-7)}%`]
+      );
+      if (wrRes.rows.length > 0) {
+        pendingWorkReq = wrRes.rows[0];
+        const jRes = await client.query('SELECT * FROM repair_jobs WHERE id = $1', [pendingWorkReq.repair_job_id]);
+        if (jRes.rows.length > 0) jobForWorkReq = jRes.rows[0];
+      }
+    }
+
+    if (pendingWorkReq && jobForWorkReq) {
+      if (isApproveCmd) {
+        const result = await RepairService.approveAdditionalWorkRequest(
+          pendingWorkReq.repair_job_id,
+          pendingWorkReq.id,
+          { name: 'WhatsApp Customer' },
+          'WhatsApp',
+          'Customer approved additional work via WhatsApp'
+        );
+        await client.query('UPDATE whatsapp_conversations SET bot_state = NULL, approval_tracking_id = NULL WHERE id = $1', [conv.id]);
+        return buildAdditionalWorkApprovedTemplate({ job: result.job, workRequest: result.request });
+      }
+
+      if (isDeclineCmd) {
+        const result = await RepairService.declineAdditionalWorkRequest(
+          pendingWorkReq.repair_job_id,
+          pendingWorkReq.id,
+          { name: 'WhatsApp Customer' },
+          'WhatsApp',
+          'Customer declined additional work via WhatsApp'
+        );
+        await client.query('UPDATE whatsapp_conversations SET bot_state = NULL, approval_tracking_id = NULL WHERE id = $1', [conv.id]);
+        return buildAdditionalWorkDeclinedTemplate({ job: result.job, workRequest: result.request });
+      }
+    }
+
+    // Priority B: Check for Active Diagnosis Quotation Approval
     let job = null;
     if (targetTrackingId) {
       const jRes = await client.query('SELECT * FROM repair_jobs WHERE UPPER(tracking_id) = UPPER($1) OR id = $1', [targetTrackingId]);
@@ -210,18 +169,17 @@ async function processBotReply(input, conv, client = db) {
       if (jRes.rows.length > 0) job = jRes.rows[0];
     }
 
-    if (job) {
+    if (job && job.status === 'Waiting for Customer Approval') {
       if (isApproveCmd) {
-        await RepairService.approveQuote(job.id, { name: 'WhatsApp Customer' });
+        const approvedJob = await RepairService.approveQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
         await client.query('UPDATE whatsapp_conversations SET bot_state = NULL, approval_tracking_id = NULL WHERE id = $1', [conv.id]);
-        const quoteAmt = parseFloat(job.quotation_amount || 0);
-        return `🎉 *Repair Approved!*\n\nThank you! Repair *${job.tracking_id}* has been approved. The assigned technician has queued your device for hardware repair. Estimated repair cost: PKR ${quoteAmt.toLocaleString('en-PK', { maximumFractionDigits: 2 })}.`;
+        return buildApprovalConfirmationTemplate(approvedJob);
       }
 
       if (isDeclineCmd) {
-        await RepairService.declineQuote(job.id, { name: 'WhatsApp Customer' });
+        const declinedJob = await RepairService.declineQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
         await client.query('UPDATE whatsapp_conversations SET bot_state = NULL, approval_tracking_id = NULL WHERE id = $1', [conv.id]);
-        return `Repair *${job.tracking_id}* has been declined. The device will be safely re-assembled and ready for pickup at our counter after diagnostic inspection charges.`;
+        return buildDeclineConfirmationTemplate(declinedJob);
       }
     }
   }
@@ -236,7 +194,7 @@ async function processBotReply(input, conv, client = db) {
 
     if (!job) {
       await client.query('UPDATE whatsapp_conversations SET bot_state = NULL WHERE id = $1', [conv.id]);
-      return `⚠️ *Tracking ID Not Found*\n\nWe could not find any active repair job matching "*${raw}*".\n\n💡 *Tips:*\n• Please send your tracking ID (e.g. *RPR-00004* or *00004*).\n• Or reply *6* to talk with our support team.`;
+      return `📋 Tracking ID Not Found\n\nWe could not find any active repair job matching "${raw}".\n\nPlease send your tracking ID (e.g. RPR-00001).`;
     }
 
     if (job.status === 'Waiting for Customer Approval') {
@@ -245,7 +203,7 @@ async function processBotReply(input, conv, client = db) {
       await client.query('UPDATE whatsapp_conversations SET bot_state = NULL WHERE id = $1', [conv.id]);
     }
 
-    return formatRepairStatusReport(job);
+    return buildTrackingResponseTemplate({ job, safeNote: job.final_remarks });
   }
 
   // 3. Menu Options
@@ -255,19 +213,19 @@ async function processBotReply(input, conv, client = db) {
        FROM products WHERE current_stock > 0 ORDER BY date_added DESC LIMIT 6`
     );
     if (prodRes.rows.length === 0) return 'No laptops or products are currently available in inventory.';
-    return '💻 *Available Laptops in Stock:*\n\n' + 
-      prodRes.rows.map((p, i) => `${i + 1}. *${p.brand} ${p.model || p.product_name}* — PKR ${parseFloat(p.expected_sale_price).toLocaleString('en-PK')} (${p.condition})`).join('\n') +
-      '\n\nReply *4* to search by budget or *6* to speak with our sales agent.';
+    return '📱 Available Laptops in Stock:\n\n' + 
+      prodRes.rows.map((p, i) => `${i + 1}. ${p.brand} ${p.model || p.product_name} — PKR ${parseFloat(p.expected_sale_price).toLocaleString('en-PK')} (${p.condition})`).join('\n') +
+      '\n\nReply 4 to search by budget or 6 to speak with our sales agent.';
   }
 
   if (t === '2' || t.includes('repair service') || t.includes('repair issue')) {
     await client.query("UPDATE whatsapp_conversations SET bot_state = 'repair_problem', lead_type = 'Repair Lead' WHERE id = $1", [conv.id]);
-    return '🔧 *Repair Service Booking*\n\nPlease describe the issue with your laptop/device (e.g. No power, Display broken, Water damaged, Motherboard heating, Windows reinstall):';
+    return '🔧 Repair Service Booking\n\nPlease describe the issue with your laptop/device (e.g. No power, Display broken, Water damaged, Motherboard heating, Windows reinstall):';
   }
 
   if (conv.bot_state === 'repair_problem') {
     await client.query("UPDATE whatsapp_conversations SET bot_state = NULL, status = 'Human Handoff', lead_type = 'Repair Lead' WHERE id = $1", [conv.id]);
-    return '✅ *Inquiry Received!*\n\nThank you! Your repair inquiry has been logged. A customer service technician will assist you with pricing and drop-off instructions shortly.';
+    return '✅ Inquiry Received!\n\nThank you! Your repair inquiry has been logged. A customer service technician will assist you with pricing and drop-off instructions shortly.';
   }
 
   if (t === '3' || t === 'track' || t.includes('track repair') || t.includes('track laptop') || t.includes('status')) {
@@ -275,13 +233,11 @@ async function processBotReply(input, conv, client = db) {
     const existingJob = await findRepairJob(null, conv.contact, client);
     if (existingJob) {
       await client.query("UPDATE whatsapp_conversations SET bot_state = 'track_id' WHERE id = $1", [conv.id]);
-      return `🔍 *Live Repair Tracking*\n\nWe found a recent repair job (*${existingJob.tracking_id}*) registered under your number.\n\n` +
-        formatRepairStatusReport(existingJob) +
-        `\n\n*(To track a different job, simply send that Tracking ID, e.g. RPR-00001)*`;
+      return buildTrackingResponseTemplate({ job: existingJob, safeNote: existingJob.final_remarks });
     }
 
     await client.query("UPDATE whatsapp_conversations SET bot_state = 'track_id' WHERE id = $1", [conv.id]);
-    return '🔍 *Live Repair Tracking*\n\nPlease enter your *Repair Tracking ID* (e.g. *RPR-00004* or digits like *00004* or *4*) to check real-time bench status:';
+    return '📋 Live Repair Tracking\n\nPlease enter your Repair Tracking ID (e.g. RPR-00001) to check real-time bench status:';
   }
 
   if (t === '4' || t.includes('quotation') || t.includes('budget')) {

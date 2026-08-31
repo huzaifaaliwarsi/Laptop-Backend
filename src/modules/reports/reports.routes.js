@@ -556,7 +556,7 @@ router.get('/purchases', requireAdmin, async (req, res, next) => {
 // =============================================================================
 router.get('/vendor-returns', requireAdmin, async (req, res, next) => {
   try {
-    const { from, to } = req.query;
+    const { from, to, staffId, paymentMethod } = req.query;
 
     let queryText = `
       SELECT 
@@ -571,6 +571,17 @@ router.get('/vendor-returns', requireAdmin, async (req, res, next) => {
       WHERE 1=1
     `;
     const params = [];
+
+    if (staffId) {
+      params.push(staffId);
+      queryText += ` AND vr.created_by = $${params.length}`;
+    }
+
+    if (paymentMethod) {
+      params.push(paymentMethod);
+      queryText += ` AND (vr.payment_method = $${params.length} OR vr.settlement_method = $${params.length})`;
+    }
+
     queryText = applyDateFilter(queryText, params, from, to, 'vr.date');
     queryText += ' ORDER BY vr.date DESC, vr.created_at DESC';
 
@@ -699,6 +710,124 @@ router.get('/inventory', requireAdmin, async (req, res, next) => {
         totalCostValue: r2(totalCostValue),
         totalSaleValue: r2(totalSaleValue),
         totalUnrealisedMargin: r2(totalSaleValue - totalCostValue),
+        lowStockCount: rows.filter(r => r.isLowStock).length
+      },
+      data: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// =============================================================================
+// GET /api/reports/spare-parts (Admin only)
+// Workshop Repair Spare Parts Inventory & Job Consumption Report.
+// Tracks in-stock valuations, quantities issued to repair jobs,
+// cost consumed, revenue collected, and gross profit margin.
+// =============================================================================
+router.get('/spare-parts', requireAdmin, async (req, res, next) => {
+  try {
+    const { category, search, status } = req.query;
+
+    let queryText = `
+      SELECT 
+        p.id, p.code, p.name, p.category, p.compatible_models,
+        p.cost_price, p.selling_price, p.current_stock, p.min_stock_alert,
+        p.status, p.created_at,
+        (p.current_stock * p.cost_price) as stock_cost_value,
+        (p.current_stock * p.selling_price) as stock_sale_value,
+        COALESCE(SUM(rpu.quantity), 0) as total_used_qty,
+        COALESCE(SUM(rpu.quantity * rpu.cost_price_snapshot), 0) as total_cogs_consumed,
+        COALESCE(SUM(rpu.customer_charge), 0) as total_revenue_generated
+      FROM repair_parts p
+      LEFT JOIN repair_parts_used rpu ON rpu.part_id = p.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (category) {
+      params.push(category);
+      queryText += ` AND p.category = $${params.length}`;
+    }
+
+    if (status) {
+      if (status === 'In Stock') {
+        queryText += ` AND p.current_stock > 0`;
+      } else if (status === 'Low Stock') {
+        queryText += ` AND p.current_stock <= p.min_stock_alert`;
+      } else if (status === 'Out of Stock') {
+        queryText += ` AND p.current_stock = 0`;
+      } else {
+        params.push(status);
+        queryText += ` AND p.status = $${params.length}`;
+      }
+    }
+
+    if (search) {
+      params.push(`%${search.trim().toLowerCase()}%`);
+      queryText += ` AND (LOWER(p.code) LIKE $${params.length} OR LOWER(p.name) LIKE $${params.length} OR LOWER(p.category) LIKE $${params.length})`;
+    }
+
+    queryText += ' GROUP BY p.id ORDER BY p.category, p.name';
+
+    const result = await db.query(queryText, params);
+
+    let totalParts = result.rows.length;
+    let totalStockUnits = 0;
+    let totalCostValue = 0;
+    let totalSaleValue = 0;
+    let totalUsedUnits = 0;
+    let totalCogsConsumed = 0;
+    let totalRevenueGenerated = 0;
+
+    const rows = result.rows.map(row => {
+      const stock = parseInt(row.current_stock || 0, 10);
+      const usedQty = parseInt(row.total_used_qty || 0, 10);
+      const costVal = r2(row.stock_cost_value);
+      const saleVal = r2(row.stock_sale_value);
+      const cogs = r2(row.total_cogs_consumed);
+      const rev = r2(row.total_revenue_generated);
+      const isLow = stock <= parseInt(row.min_stock_alert || 2, 10);
+
+      totalStockUnits += stock;
+      totalCostValue += costVal;
+      totalSaleValue += saleVal;
+      totalUsedUnits += usedQty;
+      totalCogsConsumed += cogs;
+      totalRevenueGenerated += rev;
+
+      return {
+        id: row.id,
+        code: row.code,
+        name: row.name,
+        category: row.category,
+        compatibleModels: row.compatible_models || '—',
+        currentStock: stock,
+        minStockAlert: parseInt(row.min_stock_alert || 2, 10),
+        costPrice: r2(row.cost_price),
+        sellingPrice: r2(row.selling_price),
+        stockCostValue: costVal,
+        stockSaleValue: saleVal,
+        usedUnits: usedQty,
+        cogsConsumed: cogs,
+        revenueGenerated: rev,
+        profitEarned: r2(rev - cogs),
+        isLowStock: isLow,
+        status: row.status
+      };
+    });
+
+    return res.json({
+      success: true,
+      summary: {
+        totalParts,
+        totalStockUnits,
+        totalCostValue: r2(totalCostValue),
+        totalSaleValue: r2(totalSaleValue),
+        totalUsedUnits,
+        totalCogsConsumed: r2(totalCogsConsumed),
+        totalRevenueGenerated: r2(totalRevenueGenerated),
+        totalPartProfit: r2(totalRevenueGenerated - totalCogsConsumed),
         lowStockCount: rows.filter(r => r.isLowStock).length
       },
       data: rows
@@ -1334,6 +1463,14 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
         FROM vendor_returns vr WHERE 1=1
       `;
       const p = [];
+      if (staffId) {
+        p.push(staffId);
+        q += ` AND vr.created_by = $${p.length}`;
+      }
+      if (paymentMethod) {
+        p.push(paymentMethod);
+        q += ` AND (vr.payment_method = $${p.length} OR vr.settlement_method = $${p.length})`;
+      }
       q = applyDateFilter(q, p, from, to, 'vr.date');
       q += ' ORDER BY vr.date DESC';
       const r = await db.query(q, p);
@@ -1428,6 +1565,36 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
         { key: 'paid', label: 'Paid (PKR)' },
         { key: 'remaining', label: 'Remaining (PKR)' },
         { key: 'expected_completion', label: 'Expected Date' }
+      ]);
+
+    } else if (type === 'spare-parts') {
+      const r = await db.query(`
+        SELECT 
+          p.code, p.name, p.category, p.compatible_models,
+          p.current_stock, p.cost_price, p.selling_price,
+          (p.current_stock * p.cost_price) as stock_cost_value,
+          (p.current_stock * p.selling_price) as stock_sale_value,
+          COALESCE(SUM(rpu.quantity), 0) as total_used_qty,
+          COALESCE(SUM(rpu.customer_charge), 0) as total_revenue,
+          p.status
+        FROM repair_parts p
+        LEFT JOIN repair_parts_used rpu ON rpu.part_id = p.id
+        GROUP BY p.id
+        ORDER BY p.category, p.name
+      `);
+      csv = toCSV(r.rows, [
+        { key: 'code', label: 'Part SKU / Code' },
+        { key: 'category', label: 'Category' },
+        { key: 'name', label: 'Part Name' },
+        { key: 'compatible_models', label: 'Compatible Models' },
+        { key: 'current_stock', label: 'Current Stock Qty' },
+        { key: 'cost_price', label: 'Unit Cost Price (PKR)' },
+        { key: 'selling_price', label: 'Customer Billing Price (PKR)' },
+        { key: 'stock_cost_value', label: 'Stock Cost Value (PKR)' },
+        { key: 'stock_sale_value', label: 'Stock Sale Value (PKR)' },
+        { key: 'total_used_qty', label: 'Consumed in Jobs (Qty)' },
+        { key: 'total_revenue', label: 'Revenue Generated (PKR)' },
+        { key: 'status', label: 'Status' }
       ]);
 
     } else {

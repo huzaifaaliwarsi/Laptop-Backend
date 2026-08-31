@@ -246,9 +246,11 @@ router.put('/:id/admin-update', requireSalesOrAdmin, async (req, res, next) => {
 // POST /api/repairs/:id/approve - Approve quotation
 router.post('/:id/approve', requireSalesOrAdmin, async (req, res, next) => {
   try {
-    const result = await RepairService.approveQuote(req.params.id, req.user);
+    const approvalSource = req.user?.role === 'sales' ? 'Sales' : 'Admin';
+    const result = await RepairService.approveQuote(req.params.id, req.user, approvalSource);
     await CacheService.invalidatePattern('route:/api/repairs*');
     await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
 
     return res.json({
       success: true,
@@ -263,7 +265,8 @@ router.post('/:id/approve', requireSalesOrAdmin, async (req, res, next) => {
 // POST /api/repairs/:id/decline - Decline quotation
 router.post('/:id/decline', requireSalesOrAdmin, async (req, res, next) => {
   try {
-    const result = await RepairService.declineQuote(req.params.id, req.user);
+    const approvalSource = req.user?.role === 'sales' ? 'Sales' : 'Admin';
+    const result = await RepairService.declineQuote(req.params.id, req.user, approvalSource);
     await CacheService.invalidatePattern('route:/api/repairs*');
     await CacheService.invalidatePattern('route:/api/dashboard*');
 
@@ -359,6 +362,123 @@ router.delete('/:id/parts/:partUsedId', async (req, res, next) => {
     return res.json({
       success: true,
       message: 'Spare part removed and stock restored to inventory',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/repairs/:id/services - Add an additional service line to repair job
+router.post('/:id/services', async (req, res, next) => {
+  try {
+    const result = await RepairService.addServiceLine(req.params.id, req.body, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
+
+    return res.json({
+      success: true,
+      message: 'Additional service added successfully',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/repairs/:id/services/:lineId - Remove a service line from repair job
+router.delete('/:id/services/:lineId', async (req, res, next) => {
+  try {
+    const result = await RepairService.removeServiceLine(req.params.id, req.params.lineId, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
+
+    return res.json({
+      success: true,
+      message: 'Service line removed from job',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/repairs/:id/additional-work - List additional work requests
+router.get('/:id/additional-work', async (req, res, next) => {
+  try {
+    const list = await RepairService.getAdditionalWorkRequests(req.params.id);
+    return res.json({
+      success: true,
+      data: list
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/repairs/:id/additional-work - Create additional work request
+router.post('/:id/additional-work', async (req, res, next) => {
+  try {
+    const request = await RepairService.createAdditionalWorkRequest(req.params.id, req.body, req.user);
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+
+    return res.status(201).json({
+      success: true,
+      message: 'Additional fault work request created and sent to customer WhatsApp for approval',
+      data: request
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/repairs/:id/additional-work/:requestId/approve - Admin / Sales approve additional work
+router.post('/:id/additional-work/:requestId/approve', async (req, res, next) => {
+  try {
+    const approvalSource = req.user?.role === 'admin' ? 'Admin' : req.user?.role === 'sales' ? 'Sales' : 'Admin';
+    const result = await RepairService.approveAdditionalWorkRequest(
+      req.params.id,
+      req.params.requestId,
+      req.user,
+      approvalSource,
+      req.body?.customerResponse || `Approved manually by ${approvalSource} (${req.user?.name || 'Staff'})`
+    );
+
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidatePattern('route:/api/invoices*');
+
+    return res.json({
+      success: true,
+      message: 'Additional work request approved successfully',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/repairs/:id/additional-work/:requestId/decline - Admin / Sales decline additional work
+router.post('/:id/additional-work/:requestId/decline', async (req, res, next) => {
+  try {
+    const approvalSource = req.user?.role === 'admin' ? 'Admin' : req.user?.role === 'sales' ? 'Sales' : 'Admin';
+    const result = await RepairService.declineAdditionalWorkRequest(
+      req.params.id,
+      req.params.requestId,
+      req.user,
+      approvalSource,
+      req.body?.customerResponse || `Declined manually by ${approvalSource} (${req.user?.name || 'Staff'})`
+    );
+
+    await CacheService.invalidatePattern('route:/api/repairs*');
+    await CacheService.invalidatePattern('route:/api/dashboard*');
+
+    return res.json({
+      success: true,
+      message: 'Additional work request declined',
       data: result
     });
   } catch (error) {

@@ -18,6 +18,15 @@ const AUTH_DIR = (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME)
   ? path.join('/tmp', 'whatsapp_auth_session')
   : path.join(__dirname, '../../../whatsapp_auth_session');
 
+const {
+  buildTrackingResponseTemplate,
+  buildApprovalConfirmationTemplate,
+  buildDeclineConfirmationTemplate,
+  buildAdditionalWorkApprovedTemplate,
+  buildAdditionalWorkDeclinedTemplate
+} = require('./whatsapp.templates');
+const RepairService = require('../repairs/repairs.service');
+
 class BaileysService {
   constructor() {
     this.sock = null;
@@ -178,7 +187,7 @@ class BaileysService {
 
         if (jRes.rows.length > 0) {
           const job = jRes.rows[0];
-          const formattedReport = this.generateLiveReport(job);
+          const formattedReport = buildTrackingResponseTemplate({ job, safeNote: job.final_remarks });
           await this.sendRawMessage(senderJid, formattedReport);
           return;
         }
@@ -186,23 +195,65 @@ class BaileysService {
 
       // 2. Check if Approval reply (APPROVE / DECLINE / 1 / 2)
       const upper = text.toUpperCase();
-      if (['APPROVE', '1', 'YES', 'OK', 'ACCEPT'].includes(upper)) {
+      const isApprove = ['APPROVE', '1', 'YES', 'OK', 'ACCEPT'].includes(upper);
+      const isDecline = ['DECLINE', '2', 'NO', 'CANCEL'].includes(upper);
+
+      if (isApprove || isDecline) {
+        // Priority A: Check for Active Additional Work Request for this sender's phone
+        const pendingWorkRes = await db.query(
+          `SELECT awr.*, rj.contact FROM repair_additional_work_requests awr
+           JOIN repair_jobs rj ON awr.repair_job_id = rj.id
+           WHERE (rj.contact LIKE $1 OR rj.contact LIKE $2) AND awr.status = 'Pending Approval'
+           ORDER BY awr.created_at DESC LIMIT 1`,
+          [`%${senderPhone.slice(-9)}%`, `%${senderPhone}%`]
+        );
+
+        if (pendingWorkRes.rows.length > 0) {
+          const pReq = pendingWorkRes.rows[0];
+          if (isApprove) {
+            const res = await RepairService.approveAdditionalWorkRequest(
+              pReq.repair_job_id,
+              pReq.id,
+              { name: 'WhatsApp Customer' },
+              'WhatsApp',
+              'Customer approved additional work via WhatsApp'
+            );
+            await this.sendRawMessage(senderJid, buildAdditionalWorkApprovedTemplate({ job: res.job, workRequest: res.request }));
+            return;
+          }
+
+          if (isDecline) {
+            const res = await RepairService.declineAdditionalWorkRequest(
+              pReq.repair_job_id,
+              pReq.id,
+              { name: 'WhatsApp Customer' },
+              'WhatsApp',
+              'Customer declined additional work via WhatsApp'
+            );
+            await this.sendRawMessage(senderJid, buildAdditionalWorkDeclinedTemplate({ job: res.job, workRequest: res.request }));
+            return;
+          }
+        }
+
+        // Priority B: Check for Diagnosis Job Quotation Approval
         const pendingJob = await db.query(
-          `SELECT * FROM repair_jobs WHERE (contact LIKE $1 OR contact LIKE $2) AND status = 'Waiting for Customer Approval' ORDER BY created_at DESC LIMIT 1`,
+          `SELECT * FROM repair_jobs 
+           WHERE (contact LIKE $1 OR contact LIKE $2) AND status = 'Waiting for Customer Approval' 
+           ORDER BY created_at DESC LIMIT 1`,
           [`%${senderPhone.slice(-9)}%`, `%${senderPhone}%`]
         );
         if (pendingJob.rows.length > 0) {
           const job = pendingJob.rows[0];
-          await db.query(
-            `UPDATE repair_jobs SET status = 'Repair Approved', approval_status = 'Approved', approved_at = CURRENT_TIMESTAMP WHERE id = $1`,
-            [job.id]
-          );
-          await db.query(
-            `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by) VALUES ($1, 'Repair Approved', 'Customer approved repair quotation via WhatsApp', 'Customer (WhatsApp)')`,
-            [job.id]
-          );
-          await this.sendRawMessage(senderJid, `✅ *Quotation Approved!*\n\nThank you! Your approval for job *${job.tracking_id}* has been confirmed. Our technicians have queued your device on the workstation for repair.`);
-          return;
+          if (isApprove) {
+            const approvedJob = await RepairService.approveQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
+            await this.sendRawMessage(senderJid, buildApprovalConfirmationTemplate(approvedJob));
+            return;
+          }
+          if (isDecline) {
+            const declinedJob = await RepairService.declineQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
+            await this.sendRawMessage(senderJid, buildDeclineConfirmationTemplate(declinedJob));
+            return;
+          }
         }
       }
 
@@ -217,34 +268,6 @@ class BaileysService {
     } catch (err) {
       console.error('[Baileys] Error handling incoming WhatsApp message:', err);
     }
-  }
-
-  generateLiveReport(job) {
-    const total = parseFloat(job.total || 0);
-    const paid = parseFloat(job.paid || 0);
-    const remaining = Math.max(0, total - paid);
-    const payStatus = remaining <= 0.005 ? '✅ Paid in Full' : paid > 0 ? '⚠️ Partial Advance' : '❌ Unpaid';
-    const device = [job.brand, job.model].filter(Boolean).join(' ') || job.product_type || 'Laptop';
-    const expected = job.expected_completion ? new Date(job.expected_completion).toLocaleDateString('en-PK', { year: 'numeric', month: 'short', day: '2-digit' }) : 'Under Diagnostic Review';
-
-    return [
-      `*━━━━━━━━━━━━━━━━━━━━━*`,
-      `🔧 *LIVE REPAIR STATUS REPORT*`,
-      `*━━━━━━━━━━━━━━━━━━━━━*`,
-      `📌 *Tracking ID:* ${job.tracking_id}`,
-      `💻 *Device:* ${device}`,
-      `👤 *Customer:* ${job.customer_name || 'Customer'}`,
-      `⚡ *Defect:* ${job.problem || 'Hardware fault'}`,
-      `📊 *Current Status:* *${job.status}*`,
-      job.diagnosed_issue ? `🔬 *Diagnosed Issue:* ${job.diagnosed_issue}` : null,
-      job.recommended_solution ? `💡 *Solution:* ${job.recommended_solution}` : null,
-      `👨‍🔧 *Technician:* ${job.technician_name || 'Senior Specialist'}`,
-      `📅 *Expected Date:* ${expected}`,
-      `*─────────────────────*`,
-      `💰 *Bill:* PKR ${total.toLocaleString('en-PK')} | Paid: PKR ${paid.toLocaleString('en-PK')} | *Bal:* PKR ${remaining.toLocaleString('en-PK')}`,
-      `*Status:* ${payStatus}`,
-      `*━━━━━━━━━━━━━━━━━━━━━*`
-    ].filter(Boolean).join('\n');
   }
 
   async sendRawMessage(jid, text) {
