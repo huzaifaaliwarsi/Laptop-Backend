@@ -1874,9 +1874,16 @@ class RepairService {
       // 3. Issue and consume parts if included in parts_payload
       let partsList = [];
       try {
-        partsList = Array.isArray(workRequest.parts_payload)
-          ? workRequest.parts_payload
-          : JSON.parse(workRequest.parts_payload || '[]');
+        let rawPayload = workRequest.parts_payload;
+        if (typeof rawPayload === 'string') {
+          try { rawPayload = JSON.parse(rawPayload); } catch (_) {}
+        }
+        if (typeof rawPayload === 'string') {
+          try { rawPayload = JSON.parse(rawPayload); } catch (_) {}
+        }
+        if (Array.isArray(rawPayload)) {
+          partsList = rawPayload;
+        }
       } catch (e) {
         partsList = [];
       }
@@ -1887,7 +1894,13 @@ class RepairService {
         if (partRes.rows.length > 0) {
           const partObj = partRes.rows[0];
           const qty = parseInt(partItem.quantity || 1, 10);
-          const sellingPrice = parseFloat(partItem.sellingPrice || partObj.selling_price || 0);
+          const sellingPrice = parseFloat(
+            partItem.customerCharge !== undefined && partItem.customerCharge !== null
+              ? partItem.customerCharge
+              : (partItem.sellingPrice !== undefined && partItem.sellingPrice !== null
+                ? partItem.sellingPrice
+                : (partObj.selling_price || 0))
+          );
           const costPrice = parseFloat(partObj.cost_price || 0);
 
           // Deduct stock

@@ -202,6 +202,103 @@ router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req
   }
 });
 
+// Spare Part Categories
+router.get('/spare-parts', async (req, res, next) => {
+  try {
+    const result = await db.query(`
+      SELECT spc.id, spc.name, spc.code_prefix, spc.is_system, spc.created_at,
+             COUNT(rp.id)::int AS part_count
+      FROM spare_part_categories spc
+      LEFT JOIN repair_parts rp ON LOWER(rp.category) = LOWER(spc.name)
+      GROUP BY spc.id, spc.name, spc.code_prefix, spc.is_system, spc.created_at
+      ORDER BY spc.id ASC
+    `);
+    return res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/spare-parts', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const { name, codePrefix } = req.body;
+    if (!name || String(name).trim() === '') {
+      return res.status(400).json({
+        success: false,
+        code: 'MISSING_NAME',
+        message: 'Spare part category name is required.'
+      });
+    }
+
+    const cleanName = String(name).trim();
+    const prefix = codePrefix ? String(codePrefix).trim().toUpperCase() : cleanName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'PRT';
+
+    const existing = await db.query('SELECT id, name FROM spare_part_categories WHERE LOWER(name) = LOWER($1)', [cleanName]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        code: 'CATEGORY_EXISTS',
+        message: `Category "${cleanName}" already exists.`
+      });
+    }
+
+    const insertRes = await db.query(
+      `INSERT INTO spare_part_categories (name, code_prefix, is_system) VALUES ($1, $2, FALSE) RETURNING id, name, code_prefix, is_system`,
+      [cleanName, prefix]
+    );
+
+    const newCategory = { ...insertRes.rows[0], part_count: 0 };
+    await CacheService.invalidatePattern('route:/api/categories*');
+    emitEvent('categories.spare_part_added', newCategory);
+
+    return res.status(201).json({
+      success: true,
+      message: `Spare part category "${cleanName}" created successfully`,
+      data: newCategory
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/spare-parts/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const catRes = await db.query('SELECT * FROM spare_part_categories WHERE id = $1', [id]);
+    if (catRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Spare part category not found.'
+      });
+    }
+
+    const category = catRes.rows[0];
+    const inUse = await db.query('SELECT COUNT(*)::int as count FROM repair_parts WHERE LOWER(category) = LOWER($1)', [category.name]);
+    const count = inUse.rows[0].count;
+    if (count > 0) {
+      return res.status(400).json({
+        success: false,
+        code: 'CATEGORY_IN_USE',
+        message: `Cannot delete category "${category.name}" because it is linked to ${count} spare part(s).`
+      });
+    }
+
+    await db.query('DELETE FROM spare_part_categories WHERE id = $1', [id]);
+    await CacheService.invalidatePattern('route:/api/categories*');
+    emitEvent('categories.spare_part_deleted', { id: parseInt(id, 10), name: category.name });
+
+    return res.json({
+      success: true,
+      message: `Spare part category "${category.name}" deleted successfully.`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Expense Categories
 router.get('/expense', async (req, res, next) => {
   try {

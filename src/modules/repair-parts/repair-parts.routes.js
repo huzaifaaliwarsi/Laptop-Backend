@@ -68,6 +68,23 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+// GET /api/repair-parts/categories - List distinct spare part categories
+router.get('/categories', async (req, res, next) => {
+  try {
+    const result = await db.query(
+      `SELECT name FROM spare_part_categories ORDER BY id ASC`
+    );
+    const catList = result.rows.map(r => r.name.trim());
+
+    return res.json({
+      success: true,
+      data: catList
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/repair-parts/:id - Get single repair part
 router.get('/:id', async (req, res, next) => {
   try {

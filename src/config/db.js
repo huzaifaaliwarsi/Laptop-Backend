@@ -143,27 +143,32 @@ const withTransaction = async (callback) => {
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
 
-      -- Update repair_parts_used to support repair_parts
-      ALTER TABLE repair_parts_used ALTER COLUMN product_id DROP NOT NULL;
-      ALTER TABLE repair_parts_used ADD COLUMN IF NOT EXISTS part_id VARCHAR(50) REFERENCES repair_parts(id) ON DELETE SET NULL;
+      -- Create dedicated spare_part_categories table
+      CREATE TABLE IF NOT EXISTS spare_part_categories (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) UNIQUE NOT NULL,
+        code_prefix VARCHAR(20) DEFAULT 'PRT',
+        is_system BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
 
-      -- Seed baseline workshop spare parts if none exist
-      INSERT INTO repair_parts (id, code, name, category, compatible_models, cost_price, selling_price, current_stock, min_stock_alert, status)
+      INSERT INTO spare_part_categories (name, code_prefix, is_system)
       VALUES
-        ('PRT-0001', 'SCRN-156-FHD', '15.6 Inch FHD 30-Pin Slim LED Screen Panel', 'Screen / Display', 'Dell Inspiron 3511, HP 15-dw, Lenovo IdeaPad 3', 7500.00, 9500.00, 10, 2, 'Active'),
-        ('PRT-0002', 'SCRN-140-FHD', '14.0 Inch FHD 30-Pin IPS Display Screen', 'Screen / Display', 'Dell Latitude 7490/5400, ThinkPad T480/T490', 7000.00, 9000.00, 8, 2, 'Active'),
-        ('PRT-0003', 'BATT-DELL-WDX', 'Dell WDX0R 42Wh 3-Cell Replacement Battery', 'Battery', 'Dell Inspiron 15-5567, 13-5368, Latitude 3480', 3200.00, 4500.00, 12, 3, 'Active'),
-        ('PRT-0004', 'BATT-HP-HT03', 'HP HT03XL Original 41Wh Battery', 'Battery', 'HP 15-da, 15-db, 14-ce, Pavilion 14-cf', 3400.00, 4800.00, 10, 3, 'Active'),
-        ('PRT-0005', 'KB-DELL-5400', 'Dell Latitude 5400/5410 Backlit Keyboard', 'Keyboard', 'Dell Latitude 5400, 5410, 5401, 7400', 1800.00, 2800.00, 6, 2, 'Active'),
-        ('PRT-0006', 'FAN-HP-15DA', 'HP 15-da / 15-db CPU Cooling Fan', 'Cooling / Fan', 'HP 15-da0000, 15-db0000, 250 G7', 650.00, 1200.00, 15, 4, 'Active'),
-        ('PRT-0007', 'JACK-DC-DELL', 'Dell 4.5mm Small Pin DC Power Jack Cable', 'Power Port / Jack', 'Dell Inspiron 3501, 3505, Vostro 3500', 400.00, 850.00, 20, 5, 'Active'),
-        ('PRT-0008', 'PORT-TYPEC-01', 'Universal USB Type-C 16-Pin Charging Connector', 'Power Port / Jack', 'Universal USB-C Laptops & Mobiles', 150.00, 500.00, 50, 10, 'Active'),
-        ('PRT-0009', 'IC-SIO-IT8586', 'ITE IT8586E FXA Super I/O Controller IC', 'Motherboard IC', 'Lenovo IdeaPad, ThinkPad motherboard circuits', 800.00, 1800.00, 10, 2, 'Active'),
-        ('PRT-0010', 'IC-PWR-TPS512', 'TPS51225 Dual Step-Down DC-DC Power IC', 'Motherboard IC', 'Dell / HP 3V/5V Standby Power Section', 350.00, 1000.00, 15, 3, 'Active'),
-        ('PRT-0011', 'TH-PASTE-MX4', 'Arctic MX-4 Thermal Compound 4g Syringe', 'Thermal Paste', 'All Laptops, Desktops & GPU Heatsinks', 950.00, 1500.00, 25, 5, 'Active'),
-        ('PRT-0012', 'RAM-DDR4-8GB', 'Kingston 8GB DDR4 3200MHz SODIMM Laptop RAM', 'RAM / Memory', 'DDR4 Supported Laptops & All-in-Ones', 3800.00, 4800.00, 14, 3, 'Active'),
-        ('PRT-0013', 'SSD-NVME-256', 'Lexar NM620 256GB M.2 NVMe PCIe SSD', 'Storage / SSD', 'All Laptops & Desktops with NVMe M.2 Slot', 4200.00, 5500.00, 12, 3, 'Active')
-      ON CONFLICT (id) DO NOTHING;
+        ('Screen / Display', 'SCR', TRUE),
+        ('Battery', 'BAT', TRUE),
+        ('Keyboard', 'KB', TRUE),
+        ('Motherboard IC', 'IC', TRUE),
+        ('Cooling / Fan', 'FAN', TRUE),
+        ('Power Port / Jack', 'JCK', TRUE),
+        ('Thermal Paste', 'THP', TRUE),
+        ('RAM / Memory', 'RAM', TRUE),
+        ('Storage / SSD', 'SSD', TRUE),
+        ('Hinges & Casing', 'HNG', TRUE),
+        ('Flex Cable & Connector', 'FLX', TRUE),
+        ('Camera / Speaker / Wi-Fi', 'MOD', TRUE),
+        ('Other Spare Part', 'PRT', TRUE)
+      ON CONFLICT (name) DO NOTHING;
 
       -- Create repair_parts_movements table (Stock Movement Ledger for Spare Parts)
       CREATE TABLE IF NOT EXISTS repair_parts_movements (
