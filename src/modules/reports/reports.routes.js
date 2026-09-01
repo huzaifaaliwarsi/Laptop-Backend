@@ -273,7 +273,7 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
 // Includes Exchange Invoice and Custom Sale Invoice types.
 // Remaining = MAX(0, total - paid); settled if <= EPSILON.
 // =============================================================================
-router.get('/sales', async (req, res, next) => {
+router.get('/sales', cacheRoute(30), async (req, res, next) => {
   try {
     const { from, to, staffId, paymentMethod, type } = req.query;
 
@@ -375,7 +375,7 @@ router.get('/sales', async (req, res, next) => {
 // Refund = MIN(refund_amount, paid) — can never exceed what was collected.
 // COGS reversed = qty_returned × cost_price_snapshot.
 // =============================================================================
-router.get('/returns', requireAdmin, async (req, res, next) => {
+router.get('/returns', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to } = req.query;
 
@@ -471,7 +471,7 @@ router.get('/returns', requireAdmin, async (req, res, next) => {
 // Vendor Purchases + Customer (Buyback) Purchases.
 // Remaining = MAX(0, total - paid - credit_adjusted).
 // =============================================================================
-router.get('/purchases', requireAdmin, async (req, res, next) => {
+router.get('/purchases', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to, paymentMethod, staffId, type } = req.query;
 
@@ -555,7 +555,7 @@ router.get('/purchases', requireAdmin, async (req, res, next) => {
 // Amount = qty × cost_price at return time.
 // Settlement modes: Cash, Online, Exchange, Vendor Adjustment.
 // =============================================================================
-router.get('/vendor-returns', requireAdmin, async (req, res, next) => {
+router.get('/vendor-returns', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to, staffId, paymentMethod } = req.query;
 
@@ -645,7 +645,7 @@ router.get('/vendor-returns', requireAdmin, async (req, res, next) => {
 //   Unrealised Margin   = Stock Value (Sale) − Stock Value (Cost)
 //   Stock = Initial + IN - OUT (running ledger, verified by current_stock)
 // =============================================================================
-router.get('/inventory', requireAdmin, async (req, res, next) => {
+router.get('/inventory', requireAdmin, cacheRoute(120), async (req, res, next) => {
   try {
     const { from, to, category } = req.query;
 
@@ -726,7 +726,7 @@ router.get('/inventory', requireAdmin, async (req, res, next) => {
 // Tracks in-stock valuations, quantities issued to repair jobs,
 // cost consumed, revenue collected, and gross profit margin.
 // =============================================================================
-router.get('/spare-parts', requireAdmin, async (req, res, next) => {
+router.get('/spare-parts', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { category, search, status } = req.query;
 
@@ -843,7 +843,7 @@ router.get('/spare-parts', requireAdmin, async (req, res, next) => {
 // Operating expenses breakdown by category and date.
 // These reduce Net Profit (not COGS — not product cost).
 // =============================================================================
-router.get('/expenses', requireAdmin, async (req, res, next) => {
+router.get('/expenses', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to, category, paymentMethod } = req.query;
 
@@ -914,7 +914,7 @@ router.get('/expenses', requireAdmin, async (req, res, next) => {
 // Repair jobs report. Remaining = MAX(0, total - paid).
 // Repair Revenue recognized only at status = 'Delivered & Closed'.
 // =============================================================================
-router.get('/repairs', async (req, res, next) => {
+router.get('/repairs', cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to, staffId, status } = req.query;
     let queryText = 'SELECT * FROM repair_jobs WHERE 1=1';
@@ -989,7 +989,7 @@ router.get('/repairs', async (req, res, next) => {
 //   Unique posted money events only (affects_money = TRUE)
 //   No double-counting: payments OR invoice entries, not both.
 // =============================================================================
-router.get('/cash-balance', requireAdmin, async (req, res, next) => {
+router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to } = req.query;
 
@@ -1110,7 +1110,7 @@ router.get('/cash-balance', requireAdmin, async (req, res, next) => {
 // Gross Profit = Total Revenue − Total COGS
 // Net Profit   = Gross Profit  − Operating Expenses
 // =============================================================================
-router.get('/profit-loss', requireAdmin, async (req, res, next) => {
+router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to } = req.query;
 
@@ -1456,6 +1456,8 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
       ]);
 
     } else if (type === 'vendor-returns') {
+      // BUG FIX: staffId and paymentMethod were used here but never declared — caused ReferenceError crash
+      const { staffId, paymentMethod } = req.query;
       let q = `
         SELECT vr.date, vr.vendor_name, vr.product_code, vr.returned_product_name,
                vr.quantity, vr.amount, vr.actual_money_received, vr.exchange_value,

@@ -4,7 +4,7 @@ const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
 const { emitEvent } = require('../../config/socket');
-const { CacheService, cacheRoute } = require('../../config/cache');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
 // GET /api/categories - All categories aggregated (Cached 300s)
 router.get('/', cacheRoute(300), async (req, res, next) => {
@@ -45,7 +45,7 @@ router.get('/', cacheRoute(300), async (req, res, next) => {
 });
 
 // Product Categories
-router.get('/product', async (req, res, next) => {
+router.get('/product', cacheRoute(300), async (req, res, next) => {
   try {
     const result = await db.query(`
       SELECT pc.id, pc.name, pc.code_prefix, pc.is_system, pc.created_at,
@@ -94,7 +94,7 @@ router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res,
     );
 
     const newCategory = { ...insertRes.rows[0], product_count: 0 };
-    await CacheService.invalidatePattern('route:/api/categories*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
     emitEvent('categories.product_added', newCategory);
 
     return res.status(201).json({
@@ -147,8 +147,8 @@ router.put('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, r
     // Update category_name in products table
     await db.query('UPDATE products SET category_name = $1 WHERE category_id = $2', [cleanName, id]);
 
-    await CacheService.invalidatePattern('route:/api/categories*');
-    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
     emitEvent('categories.product_updated', updated.rows[0]);
 
     return res.json({
@@ -190,7 +190,7 @@ router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req
     }
 
     await db.query('DELETE FROM product_categories WHERE id = $1', [id]);
-    await CacheService.invalidatePattern('route:/api/categories*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
     emitEvent('categories.product_deleted', { id: parseInt(id, 10), name: category.name });
 
     return res.json({
@@ -203,7 +203,7 @@ router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req
 });
 
 // Spare Part Categories
-router.get('/spare-parts', async (req, res, next) => {
+router.get('/spare-parts', cacheRoute(300), async (req, res, next) => {
   try {
     const result = await db.query(`
       SELECT spc.id, spc.name, spc.code_prefix, spc.is_system, spc.created_at,
@@ -251,7 +251,7 @@ router.post('/spare-parts', authenticateToken, requireSalesOrAdmin, async (req, 
     );
 
     const newCategory = { ...insertRes.rows[0], part_count: 0 };
-    await CacheService.invalidatePattern('route:/api/categories*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
     emitEvent('categories.spare_part_added', newCategory);
 
     return res.status(201).json({
@@ -287,7 +287,7 @@ router.delete('/spare-parts/:id', authenticateToken, requireSalesOrAdmin, async 
     }
 
     await db.query('DELETE FROM spare_part_categories WHERE id = $1', [id]);
-    await CacheService.invalidatePattern('route:/api/categories*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
     emitEvent('categories.spare_part_deleted', { id: parseInt(id, 10), name: category.name });
 
     return res.json({
@@ -300,7 +300,7 @@ router.delete('/spare-parts/:id', authenticateToken, requireSalesOrAdmin, async 
 });
 
 // Expense Categories
-router.get('/expense', async (req, res, next) => {
+router.get('/expense', cacheRoute(300), async (req, res, next) => {
   try {
     const result = await db.query('SELECT id, name FROM expense_categories ORDER BY id ASC');
     return res.json({
@@ -367,7 +367,7 @@ router.delete('/expense/:id', authenticateToken, requireAdmin, async (req, res, 
 });
 
 // Accessory Categories
-router.get('/accessory', async (req, res, next) => {
+router.get('/accessory', cacheRoute(300), async (req, res, next) => {
   try {
     const result = await db.query('SELECT id, name FROM accessory_categories ORDER BY name ASC');
     return res.json({
@@ -383,8 +383,8 @@ router.get('/accessory', async (req, res, next) => {
 // REPAIR CATEGORIES (PostgreSQL master table)
 // ==========================================
 
-// GET /api/categories/repair - List repair categories
-router.get('/repair', async (req, res, next) => {
+// GET /api/categories/repair - List repair categories (Cached 120s)
+router.get('/repair', cacheRoute(120), async (req, res, next) => {
   try {
     const { activeOnly } = req.query;
     let queryText = `

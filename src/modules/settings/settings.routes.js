@@ -4,10 +4,10 @@ const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin } = require('../../middleware/rbac');
 const { emitEvent } = require('../../config/socket');
-const { CacheService, cacheRoute } = require('../../config/cache');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
-// GET /api/settings/company - Public or any authenticated user (Always live per-branch)
-router.get('/company', async (req, res, next) => {
+// GET /api/settings/company - Public or any authenticated user (Cached 300s — called on every invoice print)
+router.get('/company', cacheRoute(300), async (req, res, next) => {
   try {
     const result = await db.query(`
       SELECT id, company_name, tagline, invoice_subtitle, phone, email, tax_number, address, invoice_footer, logo_data, ntn, strn, pos_id, fbr_pos_id, updated_at
@@ -52,6 +52,8 @@ router.get('/company', async (req, res, next) => {
 });
 
 // PUT /api/settings/company - Update company branding (Admin only)
+// BUG FIX: Previous version had $6 used twice (tax_number AND ntn both mapped to $6),
+// causing strn, pos_id, address to all receive wrong values. Fixed with correct param mapping.
 router.put('/company', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
     const { companyName, tagline, invoiceSubtitle, phone, email, taxNumber, ntn, strn, posId, address, invoiceFooter, logoData } = req.body;
@@ -64,11 +66,16 @@ router.put('/company', authenticateToken, requireAdmin, async (req, res, next) =
       });
     }
 
-    const finalNtn = (ntn !== undefined ? ntn : taxNumber) ? String(ntn || taxNumber).trim() : null;
+    // FIXED: Correct param ordering — previously $6 was used for both tax_number AND ntn
+    // Now: $1=companyName, $2=tagline, $3=invoiceSubtitle, $4=phone, $5=email,
+    //      $6=taxNumber, $7=ntn, $8=strn, $9=posId, $10=address, $11=invoiceFooter, $12=logoData
+    const finalNtn = ntn !== undefined ? (ntn ? String(ntn).trim() : null)
+                   : (taxNumber ? String(taxNumber).trim() : null);
+    const finalTaxNumber = taxNumber ? String(taxNumber).trim() : (ntn ? String(ntn).trim() : null);
 
     const updateRes = await db.query(`
       INSERT INTO business_settings (id, company_name, tagline, invoice_subtitle, phone, email, tax_number, ntn, strn, pos_id, address, invoice_footer, logo_data, updated_at)
-      VALUES (1, $1, $2, $3, $4, $5, $6, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
+      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP)
       ON CONFLICT (id) DO UPDATE SET
         company_name = EXCLUDED.company_name,
         tagline = EXCLUDED.tagline,
@@ -90,15 +97,16 @@ router.put('/company', authenticateToken, requireAdmin, async (req, res, next) =
       invoiceSubtitle ? invoiceSubtitle.trim() : null,
       phone ? phone.trim() : null,
       email ? email.trim() : null,
-      finalNtn,
-      strn ? strn.trim() : null,
-      posId ? posId.trim() : null,
-      address ? address.trim() : null,
-      invoiceFooter ? invoiceFooter.trim() : null,
-      logoData || null
+      finalTaxNumber,        // $6 = tax_number
+      finalNtn,              // $7 = ntn
+      strn ? strn.trim() : null,    // $8 = strn
+      posId ? posId.trim() : null,  // $9 = pos_id
+      address ? address.trim() : null,       // $10 = address
+      invoiceFooter ? invoiceFooter.trim() : null,  // $11 = invoice_footer
+      logoData || null       // $12 = logo_data
     ]);
 
-    await CacheService.invalidatePattern('route:/api/settings*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/settings*');
     emitEvent('settings.company_updated', updateRes.rows[0]);
 
     return res.json({
@@ -111,8 +119,8 @@ router.put('/company', authenticateToken, requireAdmin, async (req, res, next) =
   }
 });
 
-// GET /api/settings/opening-balances (Admin only)
-router.get('/opening-balances', authenticateToken, requireAdmin, async (req, res, next) => {
+// GET /api/settings/opening-balances (Admin only) — Cached 120s
+router.get('/opening-balances', authenticateToken, requireAdmin, cacheRoute(120), async (req, res, next) => {
   try {
     const result = await db.query('SELECT opening_cash, opening_online FROM business_settings WHERE id = 1');
     const cash = result.rows.length > 0 ? parseFloat(result.rows[0].opening_cash || 0) : 0;
@@ -147,6 +155,8 @@ router.put('/opening-balances', authenticateToken, requireAdmin, async (req, res
         updated_at = CURRENT_TIMESTAMP
     `, [cash, online]);
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/settings*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     emitEvent('settings.balances_updated', { openingCash: cash, openingOnline: online });
 
     return res.json({
@@ -202,6 +212,9 @@ router.post('/reset-database', authenticateToken, requireAdmin, async (req, res,
         WHERE id = 1
       `);
     });
+
+    // Flush entire cache after full database reset
+    await CacheService.flush();
 
     emitEvent('database.reset', { timestamp: new Date() });
 

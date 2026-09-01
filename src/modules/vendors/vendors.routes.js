@@ -5,7 +5,7 @@ const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
 const { emitEvent } = require('../../config/socket');
-const { CacheService, cacheRoute } = require('../../config/cache');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
 router.use(authenticateToken);
 
@@ -97,7 +97,7 @@ router.post('/', requireSalesOrAdmin, async (req, res, next) => {
       [vendorId, cleanName, cleanContact, cleanAddress, cleanNotes]
     );
 
-    await CacheService.invalidatePattern('route:/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
     emitEvent('vendors.created', insertRes.rows[0]);
 
     return res.status(201).json({
@@ -149,7 +149,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       return updateRes.rows[0];
     });
 
-    await CacheService.invalidatePattern('route:/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
     emitEvent('vendors.updated', result);
 
     return res.json({
@@ -180,7 +180,7 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     }
 
     await db.query('DELETE FROM vendors WHERE id = $1', [id]);
-    await CacheService.invalidatePattern('route:/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
     emitEvent('vendors.deleted', { id });
 
     return res.json({

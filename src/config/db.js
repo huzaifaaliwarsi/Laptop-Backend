@@ -204,17 +204,32 @@ const master = {
       ON CONFLICT (name) DO NOTHING;
 
       -- Migration: Spare parts inventory movements audit trail
+      -- BUG FIX: part_id must be INT (not VARCHAR) to match repair_parts.id SERIAL type.
+      -- Also added all missing columns that routes depend on (part_code, part_name, direction, etc.).
       CREATE TABLE IF NOT EXISTS repair_parts_movements (
         id SERIAL PRIMARY KEY,
-        part_id VARCHAR(50) NOT NULL REFERENCES repair_parts(id) ON DELETE CASCADE,
-        type VARCHAR(50) NOT NULL,
-        quantity INT NOT NULL,
-        reference_type VARCHAR(50),
+        part_id INT REFERENCES repair_parts(id) ON DELETE CASCADE,
+        part_code VARCHAR(50),
+        part_name VARCHAR(255),
+        direction VARCHAR(10) NOT NULL DEFAULT 'IN',
+        quantity INT NOT NULL DEFAULT 0,
+        reason TEXT,
+        reference_type VARCHAR(100),
         reference_id VARCHAR(100),
-        notes TEXT,
-        created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+        balance_after INT DEFAULT 0,
+        performed_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+        performed_by_name VARCHAR(255),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
+
+      -- Add any missing columns to existing repair_parts_movements tables
+      ALTER TABLE repair_parts_movements ADD COLUMN IF NOT EXISTS part_code VARCHAR(50);
+      ALTER TABLE repair_parts_movements ADD COLUMN IF NOT EXISTS part_name VARCHAR(255);
+      ALTER TABLE repair_parts_movements ADD COLUMN IF NOT EXISTS direction VARCHAR(10) DEFAULT 'IN';
+      ALTER TABLE repair_parts_movements ADD COLUMN IF NOT EXISTS reason TEXT;
+      ALTER TABLE repair_parts_movements ADD COLUMN IF NOT EXISTS balance_after INT DEFAULT 0;
+      ALTER TABLE repair_parts_movements ADD COLUMN IF NOT EXISTS performed_by_name VARCHAR(255);
+      ALTER TABLE repair_parts_movements ADD COLUMN IF NOT EXISTS performed_by VARCHAR(50);
 
       CREATE INDEX IF NOT EXISTS idx_repair_parts_code ON repair_parts(code);
       CREATE INDEX IF NOT EXISTS idx_repair_parts_category ON repair_parts(category);
@@ -248,9 +263,18 @@ const master = {
       CREATE INDEX IF NOT EXISTS idx_addl_work_status ON repair_additional_work_requests(status);
 
       -- Migration: Operational role cleanup (Branch users can only be admin, sales, technician)
-      UPDATE users SET role = 'admin' WHERE role = 'super_admin' OR role = 'Super Admin';
+      -- BUG FIX: Wrapped in DO block with existence check so it only runs once, not on every restart.
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM users WHERE role IN ('super_admin', 'Super Admin') LIMIT 1) THEN
+          UPDATE users SET role = 'admin' WHERE role = 'super_admin' OR role = 'Super Admin';
+        END IF;
+      END $$;
       ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
       ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'sales', 'technician'));
+
+      -- Add status column to repair_parts if missing
+      ALTER TABLE repair_parts ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'Active';
     `);
   } catch (err) {
     console.error('[DB Init] Column check error:', err.message);

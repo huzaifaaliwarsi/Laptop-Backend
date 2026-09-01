@@ -147,6 +147,33 @@ const CacheService = {
     }
   },
 
+  /**
+   * Branch-scoped invalidation: only clears cache for a specific branch.
+   * Use this in all mutation handlers to prevent unnecessary cross-branch cache eviction.
+   * Format: route:branch_<id>:<path pattern>
+   *
+   * @param {number|string} branchId - The branch ID (from req.branchId or branchStore.branchId)
+   * @param {string} routePattern - The API path pattern, e.g. '/api/expenses*'
+   */
+  async invalidateBranchPattern(branchId, routePattern) {
+    if (!branchId) {
+      // No branch context — fall back to global invalidation (safe but broader)
+      return this.invalidatePattern(`route:*:${routePattern}`);
+    }
+    const pattern = `route:branch_${branchId}:${routePattern}`;
+    memoryFallback.invalidatePattern(pattern);
+    if (isRedisAvailable && redisClient) {
+      try {
+        const keys = await redisClient.keys(pattern);
+        if (keys.length > 0) {
+          await redisClient.del(...keys);
+        }
+      } catch (err) {
+        // Ignore
+      }
+    }
+  },
+
   async flush() {
     memoryFallback.flush();
     if (isRedisAvailable && redisClient) {
@@ -208,9 +235,16 @@ function cacheRoute(ttlSeconds = 60, customKeyFn = null) {
     const role = req.user?.role || 'anon';
     const userId = req.user?.id || 'anon';
 
+    // Strip dynamic cache-busting params (_t, _, timestamp, t) so queries properly hit Redis
+    const cleanQuery = { ...(req.query || {}) };
+    delete cleanQuery._t;
+    delete cleanQuery._;
+    delete cleanQuery.timestamp;
+    delete cleanQuery.t;
+
     const key = customKeyFn
       ? customKeyFn(req)
-      : `route:${branchScope}:${req.baseUrl || ''}${req.path || ''}:${JSON.stringify(req.query || {})}:${role}:${userId}`;
+      : `route:${branchScope}:${req.baseUrl || ''}${req.path || ''}:${JSON.stringify(cleanQuery)}:${role}:${userId}`;
 
     try {
       const cached = await CacheService.get(key);
@@ -236,7 +270,34 @@ function cacheRoute(ttlSeconds = 60, customKeyFn = null) {
   };
 }
 
+/**
+ * Extract the verified branch ID for the current request.
+ * Priority: AsyncLocalStorage branchStore > req.user.branchId > req.branchId
+ * Used in mutation handlers to scope cache invalidation to the correct branch only.
+ *
+ * @param {import('express').Request} req
+ * @returns {number|null} branchId or null if super-admin all-branches context
+ */
+function getBranchIdFromReq(req) {
+  try {
+    const { getBranchStore } = require('../middleware/branchContext');
+    const branchStore = getBranchStore();
+    if (req.user?.isSuperAdmin || branchStore?.isSuperAdmin) {
+      // Super admin acting on specific branch via header
+      if (req.headers && req.headers['x-branch-id']) {
+        const hb = parseInt(req.headers['x-branch-id'], 10);
+        return !isNaN(hb) ? hb : null;
+      }
+      return null; // SA without specific branch — caller should use invalidatePattern instead
+    }
+    return branchStore?.branchId || req.user?.branchId || req.branchId || null;
+  } catch {
+    return req.user?.branchId || req.branchId || null;
+  }
+}
+
 module.exports = {
   CacheService,
-  cacheRoute
+  cacheRoute,
+  getBranchIdFromReq
 };

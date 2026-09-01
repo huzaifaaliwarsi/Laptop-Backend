@@ -4,7 +4,7 @@ const db = require('../../config/db');
 const RepairService = require('./repairs.service');
 const authenticateToken = require('../../middleware/auth');
 const { requireSalesOrAdmin, requireTechnicianOrAdmin } = require('../../middleware/rbac');
-const { CacheService, cacheRoute } = require('../../config/cache');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
 router.use(authenticateToken);
 
@@ -152,9 +152,9 @@ router.get('/:id', cacheRoute(60), async (req, res, next) => {
 router.post('/', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.createJob(req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/customers*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/customers*');
 
     return res.status(201).json({
       success: true,
@@ -170,8 +170,8 @@ router.post('/', requireSalesOrAdmin, async (req, res, next) => {
 router.put('/:id/technical-update', requireTechnicianOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.technicalUpdate(req.params.id, req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
 
     return res.json({
       success: true,
@@ -230,8 +230,8 @@ router.put('/:id/admin-update', requireSalesOrAdmin, async (req, res, next) => {
       return updateRes.rows[0];
     });
 
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
 
     return res.json({
       success: true,
@@ -248,9 +248,9 @@ router.post('/:id/approve', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const approvalSource = req.user?.role === 'sales' ? 'Sales' : 'Admin';
     const result = await RepairService.approveQuote(req.params.id, req.user, approvalSource);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
 
     return res.json({
       success: true,
@@ -267,8 +267,8 @@ router.post('/:id/decline', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const approvalSource = req.user?.role === 'sales' ? 'Sales' : 'Admin';
     const result = await RepairService.declineQuote(req.params.id, req.user, approvalSource);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
 
     return res.json({
       success: true,
@@ -284,9 +284,9 @@ router.post('/:id/decline', requireSalesOrAdmin, async (req, res, next) => {
 router.post('/:id/collect-payment', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.collectPayment(req.params.id, req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
 
     return res.json({
       success: true,
@@ -302,9 +302,9 @@ router.post('/:id/collect-payment', requireSalesOrAdmin, async (req, res, next) 
 router.post('/:id/deliver', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await RepairService.payAndDeliver(req.params.id, req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
 
     return res.json({
       success: true,
@@ -320,9 +320,9 @@ router.post('/:id/deliver', requireSalesOrAdmin, async (req, res, next) => {
 router.post('/:id/parts', async (req, res, next) => {
   try {
     const result = await RepairService.addUsedPart(req.params.id, req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
 
     return res.json({
       success: true,
@@ -338,8 +338,8 @@ router.post('/:id/parts', async (req, res, next) => {
 router.put('/:id/parts/:partUsedId', async (req, res, next) => {
   try {
     const result = await RepairService.updateUsedPart(req.params.id, req.params.partUsedId, req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
 
     return res.json({
       success: true,
@@ -355,9 +355,9 @@ router.put('/:id/parts/:partUsedId', async (req, res, next) => {
 router.delete('/:id/parts/:partUsedId', async (req, res, next) => {
   try {
     const result = await RepairService.removeUsedPart(req.params.id, req.params.partUsedId, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
 
     return res.json({
       success: true,
@@ -373,9 +373,9 @@ router.delete('/:id/parts/:partUsedId', async (req, res, next) => {
 router.post('/:id/services', async (req, res, next) => {
   try {
     const result = await RepairService.addServiceLine(req.params.id, req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
 
     return res.json({
       success: true,
@@ -391,9 +391,9 @@ router.post('/:id/services', async (req, res, next) => {
 router.delete('/:id/services/:lineId', async (req, res, next) => {
   try {
     const result = await RepairService.removeServiceLine(req.params.id, req.params.lineId, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
 
     return res.json({
       success: true,
@@ -422,8 +422,8 @@ router.get('/:id/additional-work', async (req, res, next) => {
 router.post('/:id/additional-work', async (req, res, next) => {
   try {
     const request = await RepairService.createAdditionalWorkRequest(req.params.id, req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
 
     return res.status(201).json({
       success: true,
@@ -447,9 +447,9 @@ router.post('/:id/additional-work/:requestId/approve', async (req, res, next) =>
       req.body?.customerResponse || `Approved manually by ${approvalSource} (${req.user?.name || 'Staff'})`
     );
 
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
 
     return res.json({
       success: true,
@@ -473,8 +473,8 @@ router.post('/:id/additional-work/:requestId/decline', async (req, res, next) =>
       req.body?.customerResponse || `Declined manually by ${approvalSource} (${req.user?.name || 'Staff'})`
     );
 
-    await CacheService.invalidatePattern('route:/api/repairs*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repairs*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
 
     return res.json({
       success: true,

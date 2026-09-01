@@ -4,7 +4,7 @@ const db = require('../../config/db');
 const InventoryService = require('./inventory.service');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
-const { CacheService, cacheRoute } = require('../../config/cache');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 const { getCreator } = require('../../utils/userHelper');
 
 router.use(authenticateToken);
@@ -292,12 +292,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       return productResult;
     });
 
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/categories*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/accounts*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
-    await CacheService.invalidatePattern('route:/api/reports*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/accounts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
 
     return res.status(201).json({
       success: true,
@@ -659,13 +659,13 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       return updatedProduct;
     });
 
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/categories*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/vendors*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
-    await CacheService.invalidatePattern('route:/api/accounts*');
-    await CacheService.invalidatePattern('route:/api/reports*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/accounts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
 
     return res.json({
       success: true,
@@ -716,10 +716,10 @@ router.post('/:id/adjust', requireAdmin, async (req, res, next) => {
       }, client);
     });
 
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/vendors*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
 
     return res.json({
       success: true,
@@ -769,10 +769,10 @@ router.post('/adjustments', requireAdmin, async (req, res, next) => {
       }, client);
     });
 
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/vendors*');
-    await CacheService.invalidatePattern('route:/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
 
     return res.json({
       success: true,
@@ -814,9 +814,9 @@ router.post('/bulk-csv', requireAdmin, async (req, res, next) => {
       }
     });
 
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/categories*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
 
     return res.json({
       success: true,
@@ -854,9 +854,9 @@ router.delete('/:id', requireSalesOrAdmin, async (req, res, next) => {
       await client.query('DELETE FROM products WHERE id = $1', [id]);
     });
 
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/categories*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
 
     emitEvent('products.deleted', { id, code: product.code });
 

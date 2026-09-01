@@ -5,9 +5,13 @@ const { getNextEntityId } = require('../../utils/codeGenerator');
 const { emitEvent } = require('../../config/socket');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin } = require('../../middleware/rbac');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
-// GET /api/repair-parts - List repair spare parts
-router.get('/', async (req, res, next) => {
+// CRITICAL FIX: All repair-parts routes now require authentication
+router.use(authenticateToken);
+
+// GET /api/repair-parts - List repair spare parts (Cached 60s)
+router.get('/', cacheRoute(60), async (req, res, next) => {
   try {
     const { search, category, status, inStockOnly, lowStockOnly } = req.query;
     let queryText = 'SELECT * FROM repair_parts WHERE 1=1';
@@ -68,8 +72,8 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// GET /api/repair-parts/categories - List distinct spare part categories
-router.get('/categories', async (req, res, next) => {
+// GET /api/repair-parts/categories - List distinct spare part categories (Cached 300s)
+router.get('/categories', cacheRoute(300), async (req, res, next) => {
   try {
     const result = await db.query(
       `SELECT name FROM spare_part_categories ORDER BY id ASC`
@@ -85,8 +89,8 @@ router.get('/categories', async (req, res, next) => {
   }
 });
 
-// GET /api/repair-parts/:id - Get single repair part
-router.get('/:id', async (req, res, next) => {
+// GET /api/repair-parts/:id - Get single repair part (Cached 60s)
+router.get('/:id', cacheRoute(60), async (req, res, next) => {
   try {
     const result = await db.query('SELECT * FROM repair_parts WHERE id = $1', [req.params.id]);
     if (result.rows.length === 0) {
@@ -184,6 +188,7 @@ router.post('/', async (req, res, next) => {
       }
     }
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repair-parts*');
     emitEvent('repairPart.created', created);
 
     return res.status(201).json({
@@ -209,8 +214,8 @@ router.post('/', async (req, res, next) => {
   }
 });
 
-// GET /api/repair-parts/:id/history - Stock movement history for a spare part
-router.get('/:id/history', async (req, res, next) => {
+// GET /api/repair-parts/:id/history - Stock movement history for a spare part (Cached 60s)
+router.get('/:id/history', cacheRoute(60), async (req, res, next) => {
   try {
     const partId = req.params.id;
     const partRes = await db.query('SELECT * FROM repair_parts WHERE id = $1', [partId]);
@@ -295,6 +300,9 @@ router.put('/:id', async (req, res, next) => {
     );
 
     const updated = updateRes.rows[0];
+
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repair-parts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     emitEvent('repairPart.updated', updated);
 
     return res.json({
@@ -375,6 +383,8 @@ router.patch('/:id/stock', async (req, res, next) => {
       console.error('[Spare Parts Movement] Error logging stock adjustment:', logErr.message);
     }
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repair-parts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     emitEvent('repairPart.updated', updated);
 
     return res.json({
@@ -403,6 +413,8 @@ router.patch('/:id/toggle', async (req, res, next) => {
     );
 
     const updated = updateRes.rows[0];
+
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repair-parts*');
     emitEvent('repairPart.updated', updated);
 
     return res.json({
@@ -416,7 +428,7 @@ router.patch('/:id/toggle', async (req, res, next) => {
 });
 
 // POST /api/repair-parts/bulk-delete - Bulk delete selected spare parts (Admin only)
-router.post('/bulk-delete', authenticateToken, requireAdmin, async (req, res, next) => {
+router.post('/bulk-delete', requireAdmin, async (req, res, next) => {
   try {
     const { ids } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) {
@@ -430,6 +442,8 @@ router.post('/bulk-delete', authenticateToken, requireAdmin, async (req, res, ne
     // Delete spare parts
     const delRes = await db.query('DELETE FROM repair_parts WHERE id = ANY($1::varchar[]) RETURNING id', [ids]);
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repair-parts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     emitEvent('repairPart.bulkDeleted', { ids });
 
     return res.json({
@@ -442,7 +456,7 @@ router.post('/bulk-delete', authenticateToken, requireAdmin, async (req, res, ne
 });
 
 // DELETE /api/repair-parts/all/wipe - Delete ALL spare parts (Admin only)
-router.delete('/all/wipe', authenticateToken, requireAdmin, async (req, res, next) => {
+router.delete('/all/wipe', requireAdmin, async (req, res, next) => {
   try {
     // Unlink from repair_parts_used
     await db.query('UPDATE repair_parts_used SET part_id = NULL');
@@ -451,6 +465,8 @@ router.delete('/all/wipe', authenticateToken, requireAdmin, async (req, res, nex
     // Delete all spare parts
     const delRes = await db.query('DELETE FROM repair_parts RETURNING id');
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repair-parts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     emitEvent('repairPart.allDeleted', {});
 
     return res.json({
@@ -483,6 +499,8 @@ router.delete('/:id', async (req, res, next) => {
     // Delete the part
     await db.query('DELETE FROM repair_parts WHERE id = $1', [partId]);
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/repair-parts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     emitEvent('repairPart.deleted', { id: partId });
 
     return res.json({

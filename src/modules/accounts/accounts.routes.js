@@ -7,11 +7,12 @@ const { getNextEntityId } = require('../../utils/codeGenerator');
 const { getAvailableBalance, validateOutflow } = require('../../utils/financialFormulas');
 const { getCreator } = require('../../utils/userHelper');
 const { emitEvent } = require('../../config/socket');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
 router.use(authenticateToken);
 
-// GET /api/accounts/drawer-balance - Current Available Cash & Online Drawer Balances
-router.get('/drawer-balance', requireSalesOrAdmin, async (req, res, next) => {
+// GET /api/accounts/drawer-balance - Current Available Cash & Online Drawer Balances (Cached 30s)
+router.get('/drawer-balance', requireSalesOrAdmin, cacheRoute(30), async (req, res, next) => {
   try {
     const cash = await getAvailableBalance('Cash');
     const online = await getAvailableBalance('Online');
@@ -66,6 +67,8 @@ router.post('/drawer-transaction', requireSalesOrAdmin, async (req, res, next) =
     const newCash = await getAvailableBalance('Cash');
     const newOnline = await getAvailableBalance('Online');
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/accounts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     emitEvent('settings.balances_updated', { cash: newCash, online: newOnline });
 
     return res.status(201).json({
@@ -82,8 +85,8 @@ router.post('/drawer-transaction', requireSalesOrAdmin, async (req, res, next) =
   }
 });
 
-// GET /api/accounts/drawer-transactions - Recent 20 drawer deposits / withdrawals
-router.get('/drawer-transactions', requireSalesOrAdmin, async (req, res, next) => {
+// GET /api/accounts/drawer-transactions - Recent 20 drawer deposits / withdrawals (Cached 60s)
+router.get('/drawer-transactions', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const result = await db.query(`
       SELECT p.*, u.name as performed_by_name
@@ -112,8 +115,8 @@ router.get('/drawer-transactions', requireSalesOrAdmin, async (req, res, next) =
   }
 });
 
-// GET /api/accounts - Filtered receivables & payables
-router.get('/', requireSalesOrAdmin, async (req, res, next) => {
+// GET /api/accounts - Filtered receivables & payables (Cached 60s)
+router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { type, partyType, partyId, status } = req.query;
     let queryText = 'SELECT * FROM accounts WHERE 1=1';
@@ -301,6 +304,11 @@ router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
       };
     });
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/accounts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/customers*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     emitEvent('payment.recorded', result);
 
     return res.status(201).json({

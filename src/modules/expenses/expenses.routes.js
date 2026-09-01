@@ -5,11 +5,13 @@ const authenticateToken = require('../../middleware/auth');
 const { getNextEntityId } = require('../../utils/codeGenerator');
 const { validateOutflow } = require('../../utils/financialFormulas');
 const { emitEvent } = require('../../config/socket');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
+// CRITICAL FIX: authenticateToken was completely missing — auth bypass patched
 router.use(authenticateToken);
 
-// GET /api/expenses - List expenses with role scoping
-router.get('/', async (req, res, next) => {
+// GET /api/expenses - List expenses with role scoping (Cached 60s)
+router.get('/', cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to, categoryId, categoryName, paymentMethod, staffId } = req.query;
     let queryText = `
@@ -149,6 +151,9 @@ router.post('/', async (req, res, next) => {
       ]
     );
 
+    const bid = getBranchIdFromReq(req);
+    await CacheService.invalidateBranchPattern(bid, '/api/expenses*');
+    await CacheService.invalidateBranchPattern(bid, '/api/reports*');
     emitEvent('expense.created', insertRes.rows[0]);
 
     return res.status(201).json({
@@ -219,6 +224,9 @@ router.put('/:id', async (req, res, next) => {
       ]
     );
 
+    const bid = getBranchIdFromReq(req);
+    await CacheService.invalidateBranchPattern(bid, '/api/expenses*');
+    await CacheService.invalidateBranchPattern(bid, '/api/reports*');
     emitEvent('expense.updated', updateRes.rows[0]);
 
     return res.json({
@@ -255,6 +263,10 @@ router.delete('/:id', async (req, res, next) => {
     }
 
     await db.query('DELETE FROM expenses WHERE id = $1', [id]);
+
+    const bid = getBranchIdFromReq(req);
+    await CacheService.invalidateBranchPattern(bid, '/api/expenses*');
+    await CacheService.invalidateBranchPattern(bid, '/api/reports*');
     emitEvent('expense.deleted', { id });
 
     return res.json({

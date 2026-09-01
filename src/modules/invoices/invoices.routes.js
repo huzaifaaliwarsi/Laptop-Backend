@@ -7,7 +7,7 @@ const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
 const { getCreator } = require('../../utils/userHelper');
 const { emitEvent } = require('../../config/socket');
-const { CacheService, cacheRoute } = require('../../config/cache');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
 router.use(authenticateToken);
 
@@ -112,10 +112,10 @@ router.get('/', cacheRoute(60), async (req, res, next) => {
 router.post('/sale', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await InvoiceService.createSale(req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/invoices*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/customers*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/customers*');
     return res.status(201).json({
       success: true,
       message: 'Sales invoice completed successfully',
@@ -130,10 +130,10 @@ router.post('/sale', requireSalesOrAdmin, async (req, res, next) => {
 router.post('/customer-purchase', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await InvoiceService.createCustomerPurchase(req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/invoices*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/customers*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/customers*');
     return res.status(201).json({
       success: true,
       message: 'Customer purchase invoice completed successfully',
@@ -148,10 +148,10 @@ router.post('/customer-purchase', requireSalesOrAdmin, async (req, res, next) =>
 router.post('/vendor-purchase', requireAdmin, async (req, res, next) => {
   try {
     const result = await InvoiceService.createVendorPurchase(req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/invoices*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
     return res.status(201).json({
       success: true,
       message: 'Vendor purchase completed successfully',
@@ -166,10 +166,10 @@ router.post('/vendor-purchase', requireAdmin, async (req, res, next) => {
 router.post('/exchange', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const result = await InvoiceService.createExchange(req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/invoices*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/customers*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/customers*');
     return res.status(201).json({
       success: true,
       message: 'Product exchange completed successfully',
@@ -184,12 +184,12 @@ router.post('/exchange', requireSalesOrAdmin, async (req, res, next) => {
 router.post('/vendor-return', requireAdmin, async (req, res, next) => {
   try {
     const result = await InvoiceService.createVendorReturn(req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/invoices*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/vendors*');
-    await CacheService.invalidatePattern('route:/api/accounts*');
-    await CacheService.invalidatePattern('route:/api/reports*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/accounts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     return res.status(201).json({
       success: true,
       message: 'Vendor return recorded successfully',
@@ -326,13 +326,13 @@ router.get('/:id', cacheRoute(60), async (req, res, next) => {
 router.post('/:id/void', requireAdmin, async (req, res, next) => {
   try {
     const result = await InvoiceService.voidSale(req.params.id, req.body, req.user);
-    await CacheService.invalidatePattern('route:/api/invoices*');
-    await CacheService.invalidatePattern('route:/api/dashboard*');
-    await CacheService.invalidatePattern('route:/api/products*');
-    await CacheService.invalidatePattern('route:/api/customers*');
-    await CacheService.invalidatePattern('route:/api/vendors*');
-    await CacheService.invalidatePattern('route:/api/accounts*');
-    await CacheService.invalidatePattern('route:/api/reports*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/customers*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/accounts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     return res.json({
       success: true,
       message: 'Sales invoice voided and inventory restored successfully',

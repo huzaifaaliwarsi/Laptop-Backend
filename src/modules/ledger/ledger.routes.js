@@ -3,11 +3,12 @@ const router = express.Router();
 const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireSalesOrAdmin } = require('../../middleware/rbac');
+const { CacheService, cacheRoute } = require('../../config/cache');
 
 router.use(authenticateToken);
 
-// GET /api/ledger/party/:partyType/:partyId - Grouped bills and chronological transaction log
-router.get('/party/:partyType/:partyId', requireSalesOrAdmin, async (req, res, next) => {
+// GET /api/ledger/party/:partyType/:partyId - Grouped bills and chronological transaction log (Cached 60s)
+router.get('/party/:partyType/:partyId', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { partyType, partyId } = req.params;
     const isVendor = partyType.toLowerCase() === 'vendor';

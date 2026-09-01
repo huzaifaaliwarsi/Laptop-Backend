@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const branchManager = require('../../config/branchManager');
 const { getAvailableBalance } = require('../../utils/financialFormulas');
+const { CacheService, cacheRoute } = require('../../config/cache');
 
 // Helper to round to 2 decimals
 function r2(v) {
@@ -73,74 +74,87 @@ async function computeBranchMetrics(pool, branchMeta = {}, from = null, to = nul
     dateFilterExp += ` AND date <= $${expParams.length}`;
   }
 
-  // 1. Sales & Purchases
-  const salesRes = await pool.query(`
-    SELECT 
-      COALESCE(SUM(CASE WHEN type = 'Sales Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_sales,
-      COUNT(CASE WHEN type = 'Sales Invoice' AND is_voided = FALSE THEN 1 END) AS sales_count,
-      COALESCE(SUM(CASE WHEN type = 'Sales Invoice' AND is_voided = FALSE THEN balance ELSE 0 END), 0) AS sales_unpaid,
-      COALESCE(SUM(CASE WHEN (type = 'Purchase Invoice' OR type = 'Vendor Purchase') AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_purchases,
-      COALESCE(SUM(CASE WHEN type = 'Buyback Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_buybacks,
-      COALESCE(SUM(CASE WHEN type = 'Exchange Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_exchanges,
-      COALESCE(SUM(CASE WHEN type = 'Return Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_returns
-    FROM invoices WHERE 1=1 ${dateFilterInv}
-  `, invParams);
+  // Execute all 9 branch metrics queries in parallel via Promise.all
+  const [
+    salesRes,
+    repairsRes,
+    cogsRes,
+    expRes,
+    accountsRes,
+    stockRes,
+    cashInDrawer,
+    onlineBalance,
+    staffRes
+  ] = await Promise.all([
+    // 1. Sales & Purchases
+    pool.query(`
+      SELECT 
+        COALESCE(SUM(CASE WHEN type = 'Sales Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_sales,
+        COUNT(CASE WHEN type = 'Sales Invoice' AND is_voided = FALSE THEN 1 END) AS sales_count,
+        COALESCE(SUM(CASE WHEN type = 'Sales Invoice' AND is_voided = FALSE THEN balance ELSE 0 END), 0) AS sales_unpaid,
+        COALESCE(SUM(CASE WHEN (type = 'Purchase Invoice' OR type = 'Vendor Purchase') AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_purchases,
+        COALESCE(SUM(CASE WHEN type = 'Buyback Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_buybacks,
+        COALESCE(SUM(CASE WHEN type = 'Exchange Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_exchanges,
+        COALESCE(SUM(CASE WHEN type = 'Return Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_returns
+      FROM invoices WHERE 1=1 ${dateFilterInv}
+    `, invParams),
 
-  // 2. Repairs
-  const repairsRes = await pool.query(`
-    SELECT 
-      COALESCE(SUM(CASE WHEN status = 'Delivered & Closed' THEN total ELSE 0 END), 0) AS repair_revenue,
-      COUNT(CASE WHEN status NOT IN ('Delivered & Closed', 'Cancelled', 'Returned Without Repair') THEN 1 END) AS active_repairs,
-      COUNT(CASE WHEN status = 'Delivered & Closed' THEN 1 END) AS completed_repairs,
-      COUNT(*) AS total_repairs_count
-    FROM repair_jobs WHERE 1=1 ${dateFilterRep}
-  `, repParams);
+    // 2. Repairs
+    pool.query(`
+      SELECT 
+        COALESCE(SUM(CASE WHEN status = 'Delivered & Closed' THEN total ELSE 0 END), 0) AS repair_revenue,
+        COUNT(CASE WHEN status NOT IN ('Delivered & Closed', 'Cancelled', 'Returned Without Repair') THEN 1 END) AS active_repairs,
+        COUNT(CASE WHEN status = 'Delivered & Closed' THEN 1 END) AS completed_repairs,
+        COUNT(*) AS total_repairs_count
+      FROM repair_jobs WHERE 1=1 ${dateFilterRep}
+    `, repParams),
 
-  // 3. COGS (Cost of Goods Sold)
-  const cogsRes = await pool.query(`
-    SELECT COALESCE(SUM(ii.quantity * COALESCE(ii.cost_price_snapshot, p.cost_price, 0)), 0) AS total_cogs
-    FROM invoice_items ii
-    JOIN invoices inv ON ii.invoice_id = inv.id
-    LEFT JOIN products p ON ii.product_id = p.id
-    WHERE inv.type = 'Sales Invoice' AND inv.is_voided = FALSE ${dateFilterInv.replace(/date/g, 'inv.date')}
-  `, invParams);
+    // 3. COGS (Cost of Goods Sold)
+    pool.query(`
+      SELECT COALESCE(SUM(ii.quantity * COALESCE(ii.cost_price_snapshot, p.cost_price, 0)), 0) AS total_cogs
+      FROM invoice_items ii
+      JOIN invoices inv ON ii.invoice_id = inv.id
+      LEFT JOIN products p ON ii.product_id = p.id
+      WHERE inv.type = 'Sales Invoice' AND inv.is_voided = FALSE ${dateFilterInv.replace(/date/g, 'inv.date')}
+    `, invParams),
 
-  // 4. Expenses
-  const expRes = await pool.query(`
-    SELECT 
-      COALESCE(SUM(amount), 0) AS total_expenses,
-      COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN amount ELSE 0 END), 0) AS cash_expenses,
-      COALESCE(SUM(CASE WHEN payment_method = 'Online' THEN amount ELSE 0 END), 0) AS online_expenses
-    FROM expenses WHERE 1=1 ${dateFilterExp}
-  `, expParams);
+    // 4. Expenses
+    pool.query(`
+      SELECT 
+        COALESCE(SUM(amount), 0) AS total_expenses,
+        COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN amount ELSE 0 END), 0) AS cash_expenses,
+        COALESCE(SUM(CASE WHEN payment_method = 'Online' THEN amount ELSE 0 END), 0) AS online_expenses
+      FROM expenses WHERE 1=1 ${dateFilterExp}
+    `, expParams),
 
-  // 5. Accounts (Receivables & Payables)
-  const accountsRes = await pool.query(`
-    SELECT 
-      COALESCE(SUM(CASE WHEN type = 'Customer Receivable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS customer_receivable,
-      COALESCE(SUM(CASE WHEN type = 'Customer Payable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS customer_payable,
-      COALESCE(SUM(CASE WHEN type = 'Vendor Payable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS vendor_payable,
-      COALESCE(SUM(CASE WHEN type = 'Vendor Receivable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS vendor_receivable
-    FROM accounts
-  `);
+    // 5. Accounts (Receivables & Payables)
+    pool.query(`
+      SELECT 
+        COALESCE(SUM(CASE WHEN type = 'Customer Receivable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS customer_receivable,
+        COALESCE(SUM(CASE WHEN type = 'Customer Payable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS customer_payable,
+        COALESCE(SUM(CASE WHEN type = 'Vendor Payable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS vendor_payable,
+        COALESCE(SUM(CASE WHEN type = 'Vendor Receivable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS vendor_receivable
+      FROM accounts
+    `),
 
-  // 6. Inventory Valuation
-  const stockRes = await pool.query(`
-    SELECT 
-      COALESCE(SUM(current_stock * cost_price), 0) AS stock_cost_value,
-      COALESCE(SUM(current_stock * expected_sale_price), 0) AS stock_sale_value,
-      COALESCE(SUM(current_stock), 0) AS total_stock_items,
-      COUNT(*) AS total_sku_count,
-      COUNT(CASE WHEN current_stock <= low_stock_alert THEN 1 END) AS low_stock_count
-    FROM products
-  `);
+    // 6. Inventory Valuation
+    pool.query(`
+      SELECT 
+        COALESCE(SUM(current_stock * cost_price), 0) AS stock_cost_value,
+        COALESCE(SUM(current_stock * expected_sale_price), 0) AS stock_sale_value,
+        COALESCE(SUM(current_stock), 0) AS total_stock_items,
+        COUNT(*) AS total_sku_count,
+        COUNT(CASE WHEN current_stock <= low_stock_alert THEN 1 END) AS low_stock_count
+      FROM products
+    `),
 
-  // 7. Cash Drawer & Online Liquidity
-  const cashInDrawer = await getAvailableBalance('Cash', pool);
-  const onlineBalance = await getAvailableBalance('Online', pool);
+    // 7. Cash Drawer & Online Liquidity
+    getAvailableBalance('Cash', pool),
+    getAvailableBalance('Online', pool),
 
-  // 8. Staff Count
-  const staffRes = await pool.query(`SELECT COUNT(*) AS total_staff FROM users WHERE status = 'Active'`);
+    // 8. Staff Count
+    pool.query(`SELECT COUNT(*) AS total_staff FROM users WHERE status = 'Active'`)
+  ]);
 
   const sRow = salesRes.rows[0] || {};
   const rRow = repairsRes.rows[0] || {};
@@ -312,9 +326,9 @@ router.post('/login', async (req, res, next) => {
   }
 });
 
-// GET /api/super-admin/dashboard & /api/super-admin/reports/consolidated
+// GET /api/super-admin/dashboard & /api/super-admin/reports/consolidated (Cached 30s)
 // Supports branchId ('all' | '1' | '2') and date filters ('from', 'to')
-router.get(['/dashboard', '/reports/consolidated'], requireSuperAdmin, async (req, res, next) => {
+router.get(['/dashboard', '/reports/consolidated'], requireSuperAdmin, cacheRoute(30), async (req, res, next) => {
   try {
     const { branchId = 'all', from, to } = req.query;
     const branches = await branchManager.listBranches();
@@ -331,16 +345,14 @@ router.get(['/dashboard', '/reports/consolidated'], requireSuperAdmin, async (re
       }
     }
 
-    const branchReports = [];
-
-    for (const b of targetBranches) {
+    // Process all target branches in parallel using Promise.all
+    const branchReports = await Promise.all(targetBranches.map(async (b) => {
       try {
         const pool = await branchManager.getBranchPool(b.id, true);
-        const report = await computeBranchMetrics(pool, b, from, to);
-        branchReports.push(report);
+        return await computeBranchMetrics(pool, b, from, to);
       } catch (err) {
         console.error(`[SuperAdmin Reporting] Error processing branch ${b.id}:`, err.message);
-        branchReports.push({
+        return {
           branchId: b.id,
           branchCode: b.branch_code,
           branchName: b.branch_name,
@@ -363,9 +375,9 @@ router.get(['/dashboard', '/reports/consolidated'], requireSuperAdmin, async (re
           customerReceivables: 0,
           vendorPayables: 0,
           staffCount: 0
-        });
+        };
       }
-    }
+    }));
 
     // Server-side Aggregation for Combined Truth
     const combined = {
@@ -437,8 +449,8 @@ router.get(['/dashboard', '/reports/consolidated'], requireSuperAdmin, async (re
   }
 });
 
-// GET /api/super-admin/branches — List registered branches
-router.get('/branches', requireSuperAdmin, async (req, res, next) => {
+// GET /api/super-admin/branches — List registered branches (Cached 60s)
+router.get('/branches', requireSuperAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const branches = await branchManager.listBranches();
     return res.json({
@@ -491,6 +503,8 @@ router.put('/branches/:id', requireSuperAdmin, async (req, res, next) => {
       JSON.stringify({ branch_name, phone, email, city, address }),
       req.user.username
     ]);
+
+    await CacheService.invalidatePattern('route:*:/api/super-admin*');
 
     return res.json({
       success: true,
@@ -552,6 +566,8 @@ router.post('/branches/provision', requireSuperAdmin, async (req, res, next) => 
       req.user?.username || 'superadmin'
     );
 
+    await CacheService.invalidatePattern('route:*:/api/super-admin*');
+
     return res.status(201).json({
       success: true,
       message: 'Branch 2 database provisioned, schema migrated, and activated successfully!',
@@ -597,6 +613,8 @@ router.patch('/branches/:id/status', requireSuperAdmin, async (req, res, next) =
       JSON.stringify({ new_status: status }),
       req.user.username
     ]);
+
+    await CacheService.invalidatePattern('route:*:/api/super-admin*');
 
     return res.json({
       success: true,
@@ -658,8 +676,8 @@ router.post('/branches/:id/admin/reset-password', requireSuperAdmin, async (req,
   }
 });
 
-// GET /api/super-admin/audit-logs — Paginated master audit logs
-router.get('/audit-logs', requireSuperAdmin, async (req, res, next) => {
+// GET /api/super-admin/audit-logs — Paginated master audit logs (Cached 30s)
+router.get('/audit-logs', requireSuperAdmin, cacheRoute(30), async (req, res, next) => {
   try {
     const limit = parseInt(req.query.limit || '50', 10);
     const offset = parseInt(req.query.offset || '0', 10);
@@ -686,8 +704,8 @@ router.get('/audit-logs', requireSuperAdmin, async (req, res, next) => {
   }
 });
 
-// GET /api/super-admin/branch-admins — List branch admins across all registered branches
-router.get('/branch-admins', requireSuperAdmin, async (req, res, next) => {
+// GET /api/super-admin/branch-admins — List branch admins across all registered branches (Cached 60s)
+router.get('/branch-admins', requireSuperAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const branches = await branchManager.listBranches();
     const branchAdmins = [];
@@ -988,6 +1006,8 @@ router.post('/branches/:id/delete', requireSuperAdmin, async (req, res, next) =>
       }),
       req.user.username || 'superadmin'
     ]);
+
+    await CacheService.invalidatePattern('route:*:/api/super-admin*');
 
     return res.json({
       success: true,

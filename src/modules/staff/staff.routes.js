@@ -8,12 +8,13 @@ const { getNextEntityId } = require('../../utils/codeGenerator');
 const { emitEvent } = require('../../config/socket');
 const identityRegistry = require('../../services/identityRegistry');
 const { normalizeUsername, normalizePhone, isValidPhone } = require('../../utils/phoneHelper');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
 // All staff endpoints require Admin or specific authenticated queries
 router.use(authenticateToken);
 
-// GET /api/staff - List staff (Admin sees all, Sales/Tech can get technician list for assignments)
-router.get('/', async (req, res, next) => {
+// GET /api/staff - List staff (Admin sees all, Sales/Tech can get technician list for assignments) (Cached 120s)
+router.get('/', cacheRoute(120), async (req, res, next) => {
   try {
     const { role } = req.query;
     let queryText = 'SELECT id, name, contact, designation, role, username, status, created_at FROM users';
@@ -121,6 +122,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         branchUserId: staffId
       });
 
+      await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/staff*');
       emitEvent('staff.created', insertRes.rows[0]);
 
       return res.status(201).json({
@@ -220,6 +222,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       updateQuery += ` WHERE id = $${params.length} RETURNING id, name, contact, designation, role, username, status, created_at, updated_at`;
 
       const result = await db.query(updateQuery, params);
+      await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/staff*');
       emitEvent('staff.updated', result.rows[0]);
 
       return res.json({
@@ -280,6 +283,7 @@ router.patch('/:id/status', requireAdmin, async (req, res, next) => {
       status: newStatus
     });
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/staff*');
     emitEvent('staff.status_changed', result.rows[0]);
 
     return res.json({
@@ -324,6 +328,7 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
       status: 'Deleted'
     });
 
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/staff*');
     emitEvent('staff.deleted', { id });
 
     return res.json({
