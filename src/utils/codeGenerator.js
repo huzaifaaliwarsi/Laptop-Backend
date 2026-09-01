@@ -82,13 +82,18 @@ async function getNextInvoiceNo(typeKey, client = db) {
 }
 
 /**
- * Generates next repair tracking ID (e.g. RPR-00001)
+ * Generates next repair tracking ID (e.g. BR01-RPR-00001, BR02-RPR-00001)
  */
 async function getNextTrackingId(client = db) {
-  const prefix = 'RPR';
+  const branchContext = require('../middleware/branchContext');
+  const store = branchContext.getBranchStore();
+  const branchId = store?.branchId || 1;
+  const branchCode = branchId === 2 ? 'BR02' : 'BR01';
+  const prefix = `${branchCode}-RPR`;
 
   const res = await client.query(
-    `SELECT tracking_id FROM repair_jobs WHERE tracking_id ILIKE 'RPR-%'`
+    `SELECT tracking_id FROM repair_jobs WHERE tracking_id ILIKE 'RPR-%' OR tracking_id ILIKE $1`,
+    [`${branchCode}-RPR-%`]
   );
 
   let maxNum = 0;

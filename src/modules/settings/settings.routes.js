@@ -6,8 +6,8 @@ const { requireAdmin } = require('../../middleware/rbac');
 const { emitEvent } = require('../../config/socket');
 const { CacheService, cacheRoute } = require('../../config/cache');
 
-// GET /api/settings/company - Public or any authenticated user (Cached 600s)
-router.get('/company', cacheRoute(600), async (req, res, next) => {
+// GET /api/settings/company - Public or any authenticated user (Always live per-branch)
+router.get('/company', async (req, res, next) => {
   try {
     const result = await db.query(`
       SELECT id, company_name, tagline, invoice_subtitle, phone, email, tax_number, address, invoice_footer, logo_data, ntn, strn, pos_id, fbr_pos_id, updated_at

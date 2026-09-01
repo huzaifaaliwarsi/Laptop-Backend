@@ -18,7 +18,7 @@ router.get('/', async (req, res, next) => {
     if (status) {
       params.push(status);
       queryText += ` AND status = $${params.length}`;
-    } else if (req.user.role !== 'admin') {
+    } else if (req.user.role !== 'admin' && req.user.role !== 'super_admin' && !req.user.isSuperAdmin) {
       queryText += " AND status = 'Active'";
     }
 

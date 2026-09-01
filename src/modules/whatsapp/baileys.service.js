@@ -176,19 +176,58 @@ class BaileysService {
       const senderPhone = senderJid.split('@')[0];
       console.log(`[Baileys] Received WhatsApp message from ${senderPhone}: "${text}"`);
 
-      // 1. Check if tracking query (e.g., RPR-1234 or REP1234)
-      const trackingMatch = text.match(/(?:RPR|REP)[-\s]?(\d+)/i) || (text.toUpperCase().startsWith('RPR-') ? [text] : null);
+      const branchManager = require('../../config/branchManager');
+      const { branchStorage } = require('../../middleware/branchContext');
+      const branches = await branchManager.listBranches();
+
+      // 1. Check if tracking query (e.g., RPR-1234, BR01-RPR-00001, or REP1234)
+      const trackingMatch = text.match(/(?:(?:BR0?1|BR0?2)[-\s]?)?(?:RPR|REP)[-\s]?(\d+)/i) || 
+                            (text.toUpperCase().includes('RPR-') ? [text] : null);
       if (trackingMatch) {
         const queryTerm = text.trim();
-        const jRes = await db.query(
-          `SELECT * FROM repair_jobs WHERE UPPER(tracking_id) = UPPER($1) OR id = $1 LIMIT 1`,
-          [queryTerm]
-        );
+        let matchedJob = null;
+        let matchedBranch = null;
+        let isPhoneVerified = false;
+        
+        for (const b of branches) {
+          try {
+            const pool = await branchManager.getBranchPool(b.id);
+            const jRes = await pool.query(
+              `SELECT * FROM repair_jobs 
+               WHERE UPPER(tracking_id) = UPPER($1) 
+                  OR id = $1 
+                  OR UPPER(tracking_id) = UPPER($2) 
+                  OR UPPER(tracking_id) LIKE UPPER($3)
+               LIMIT 1`,
+              [queryTerm, queryTerm.replace(/^(?:BR0?1|BR0?2)[-\s]?/i, ''), `%${queryTerm}%`]
+            );
 
-        if (jRes.rows.length > 0) {
-          const job = jRes.rows[0];
-          const formattedReport = buildTrackingResponseTemplate({ job, safeNote: job.final_remarks });
-          await this.sendRawMessage(senderJid, formattedReport);
+            if (jRes.rows.length > 0) {
+              const job = jRes.rows[0];
+              matchedJob = job;
+              matchedBranch = b;
+
+              // Verify sender phone number against registered job contact
+              const cleanJobContact = String(job.contact || '').replace(/[^0-9]/g, '');
+              const cleanSender = String(senderPhone).replace(/[^0-9]/g, '');
+              if (cleanJobContact && cleanSender && (cleanJobContact.includes(cleanSender.slice(-8)) || cleanSender.includes(cleanJobContact.slice(-8)))) {
+                isPhoneVerified = true;
+                const formattedReport = buildTrackingResponseTemplate({ job, safeNote: job.final_remarks });
+                await this.sendRawMessage(senderJid, formattedReport);
+                return;
+              }
+            }
+          } catch (e) {
+            console.warn(`[Baileys] Error checking tracking in branch ${b.id}:`, e.message);
+          }
+        }
+
+        // If job was found but phone did not match
+        if (matchedJob && !isPhoneVerified) {
+          await this.sendRawMessage(
+            senderJid,
+            `🔒 *Security Notice*\n\nRepair Job *${matchedJob.tracking_id}* was found in *${matchedBranch?.branch_name || 'System'}*, but your WhatsApp number is not registered for this job.\n\nFor privacy & security, please message from your registered phone number or contact branch support directly.`
+          );
           return;
         }
       }
@@ -199,60 +238,80 @@ class BaileysService {
       const isDecline = ['DECLINE', '2', 'NO', 'CANCEL'].includes(upper);
 
       if (isApprove || isDecline) {
-        // Priority A: Check for Active Additional Work Request for this sender's phone
-        const pendingWorkRes = await db.query(
-          `SELECT awr.*, rj.contact FROM repair_additional_work_requests awr
-           JOIN repair_jobs rj ON awr.repair_job_id = rj.id
-           WHERE (rj.contact LIKE $1 OR rj.contact LIKE $2) AND awr.status = 'Pending Approval'
-           ORDER BY awr.created_at DESC LIMIT 1`,
-          [`%${senderPhone.slice(-9)}%`, `%${senderPhone}%`]
-        );
-
-        if (pendingWorkRes.rows.length > 0) {
-          const pReq = pendingWorkRes.rows[0];
-          if (isApprove) {
-            const res = await RepairService.approveAdditionalWorkRequest(
-              pReq.repair_job_id,
-              pReq.id,
-              { name: 'WhatsApp Customer' },
-              'WhatsApp',
-              'Customer approved additional work via WhatsApp'
+        for (const b of branches) {
+          try {
+            const pool = await branchManager.getBranchPool(b.id);
+            
+            // Priority A: Check for Active Additional Work Request for this sender's phone
+            const pendingWorkRes = await pool.query(
+              `SELECT awr.*, rj.contact FROM repair_additional_work_requests awr
+               JOIN repair_jobs rj ON awr.repair_job_id = rj.id
+               WHERE (rj.contact LIKE $1 OR rj.contact LIKE $2) AND awr.status = 'Pending Approval'
+               ORDER BY awr.created_at DESC LIMIT 1`,
+              [`%${senderPhone.slice(-9)}%`, `%${senderPhone}%`]
             );
-            await this.sendRawMessage(senderJid, buildAdditionalWorkApprovedTemplate({ job: res.job, workRequest: res.request }));
-            return;
-          }
 
-          if (isDecline) {
-            const res = await RepairService.declineAdditionalWorkRequest(
-              pReq.repair_job_id,
-              pReq.id,
-              { name: 'WhatsApp Customer' },
-              'WhatsApp',
-              'Customer declined additional work via WhatsApp'
+            if (pendingWorkRes.rows.length > 0) {
+              const pReq = pendingWorkRes.rows[0];
+              
+              let resultTemplate = null;
+              await branchStorage.run({ branchId: b.id, pool }, async () => {
+                if (isApprove) {
+                  const res = await RepairService.approveAdditionalWorkRequest(
+                    pReq.repair_job_id,
+                    pReq.id,
+                    { name: 'WhatsApp Customer' },
+                    'WhatsApp',
+                    'Customer approved additional work via WhatsApp'
+                  );
+                  resultTemplate = buildAdditionalWorkApprovedTemplate({ job: res.job, workRequest: res.request });
+                } else if (isDecline) {
+                  const res = await RepairService.declineAdditionalWorkRequest(
+                    pReq.repair_job_id,
+                    pReq.id,
+                    { name: 'WhatsApp Customer' },
+                    'WhatsApp',
+                    'Customer declined additional work via WhatsApp'
+                  );
+                  resultTemplate = buildAdditionalWorkDeclinedTemplate({ job: res.job, workRequest: res.request });
+                }
+              });
+
+              if (resultTemplate) {
+                await this.sendRawMessage(senderJid, resultTemplate);
+                return;
+              }
+            }
+
+            // Priority B: Check for Diagnosis Job Quotation Approval
+            const pendingJob = await pool.query(
+              `SELECT * FROM repair_jobs 
+               WHERE (contact LIKE $1 OR contact LIKE $2) AND status = 'Waiting for Customer Approval' 
+               ORDER BY created_at DESC LIMIT 1`,
+              [`%${senderPhone.slice(-9)}%`, `%${senderPhone}%`]
             );
-            await this.sendRawMessage(senderJid, buildAdditionalWorkDeclinedTemplate({ job: res.job, workRequest: res.request }));
-            return;
-          }
-        }
 
-        // Priority B: Check for Diagnosis Job Quotation Approval
-        const pendingJob = await db.query(
-          `SELECT * FROM repair_jobs 
-           WHERE (contact LIKE $1 OR contact LIKE $2) AND status = 'Waiting for Customer Approval' 
-           ORDER BY created_at DESC LIMIT 1`,
-          [`%${senderPhone.slice(-9)}%`, `%${senderPhone}%`]
-        );
-        if (pendingJob.rows.length > 0) {
-          const job = pendingJob.rows[0];
-          if (isApprove) {
-            const approvedJob = await RepairService.approveQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
-            await this.sendRawMessage(senderJid, buildApprovalConfirmationTemplate(approvedJob));
-            return;
-          }
-          if (isDecline) {
-            const declinedJob = await RepairService.declineQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
-            await this.sendRawMessage(senderJid, buildDeclineConfirmationTemplate(declinedJob));
-            return;
+            if (pendingJob.rows.length > 0) {
+              const job = pendingJob.rows[0];
+              let resultTemplate = null;
+              
+              await branchStorage.run({ branchId: b.id, pool }, async () => {
+                if (isApprove) {
+                  const approvedJob = await RepairService.approveQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
+                  resultTemplate = buildApprovalConfirmationTemplate(approvedJob);
+                } else if (isDecline) {
+                  const declinedJob = await RepairService.declineQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
+                  resultTemplate = buildDeclineConfirmationTemplate(declinedJob);
+                }
+              });
+
+              if (resultTemplate) {
+                await this.sendRawMessage(senderJid, resultTemplate);
+                return;
+              }
+            }
+          } catch (bErr) {
+            console.warn(`[Baileys] Error processing approval in branch ${b.id}:`, bErr.message);
           }
         }
       }

@@ -324,7 +324,8 @@ router.get('/sales', async (req, res, next) => {
     const rows = result.rows.map(row => {
       const total = r2(row.total);
       const paid = r2(row.paid);
-      const cogs = req.user.role === 'admin' ? r2(row.cogs) : 0;
+      const isPrivileged = req.user.role === 'admin' || req.user.role === 'super_admin' || req.user.isSuperAdmin;
+      const cogs = isPrivileged ? r2(row.cogs) : 0;
       const remaining = Math.max(0, r2(total - paid));
       const settled = remaining <= EPSILON;
       grossSales += total;

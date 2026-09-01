@@ -5,6 +5,7 @@ const InventoryService = require('./inventory.service');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
 const { CacheService, cacheRoute } = require('../../config/cache');
+const { getCreator } = require('../../utils/userHelper');
 
 router.use(authenticateToken);
 
@@ -214,6 +215,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (vRow.rows.length > 0) vendorContact = vRow.rows[0].contact;
         }
 
+        // Validate user ID in local branch DB to support Super Admin operating context
+        let validUserId = null;
+        if (req.user?.id) {
+          const uRes = await client.query('SELECT id FROM users WHERE id = $1', [req.user.id]);
+          if (uRes.rows.length > 0) validUserId = uRes.rows[0].id;
+        }
+
         // Insert Invoice
         const invRes = await client.query(
           `INSERT INTO invoices (
@@ -228,7 +236,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           [
             generatedInvoiceId, generatedInvoiceNo, purchaseDate, vendorId, vendorName, vendorContact,
             totalCost, paidAmount, balance, paymentMethod,
-            referenceId, pStatus, req.user.id, req.user.name
+            referenceId, pStatus, validUserId, req.user.name || 'Platform Super Admin'
           ]
         );
 
@@ -261,7 +269,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             )`,
             [
               payId, generatedInvoiceId, generatedInvoiceNo, vendorId, vendorName,
-              paidAmount, purchaseDate, paymentMethod, referenceId, req.user.id, req.user.name
+              paidAmount, purchaseDate, paymentMethod, referenceId, validUserId, req.user.name || 'Platform Super Admin'
             ]
           );
         }
@@ -509,6 +517,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // Update/Insert Payment
           const existingPayRes = await client.query('SELECT id FROM payments WHERE invoice_id = $1 LIMIT 1', [targetInvoiceId]);
           if (paidAmount > 0) {
+            const creator = getCreator(req.user);
             if (existingPayRes.rows.length > 0) {
               await client.query(
                 `UPDATE payments 
@@ -531,7 +540,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
                 )`,
                 [
                   payId, targetInvoiceId, targetInvoiceNo, vId, vName,
-                  paidAmount, pDate, paymentMethod, referenceId, req.user?.id || null, req.user?.name || 'Admin'
+                  paidAmount, pDate, paymentMethod, referenceId, creator.id, creator.name
                 ]
               );
             }
@@ -573,6 +582,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
           targetInvoiceNo = candidateInvNo;
           targetInvoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
+          const creator = getCreator(req.user);
 
           const invRes = await client.query(
             `INSERT INTO invoices (
@@ -587,7 +597,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             [
               targetInvoiceId, targetInvoiceNo, pDate, vId, vName, vendorContact,
               totalCost, paidAmount, balance, paymentMethod,
-              referenceId, pStatus, req.user?.id || null, req.user?.name || 'Admin'
+              referenceId, pStatus, creator.id, creator.name
             ]
           );
 
@@ -618,7 +628,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
               )`,
               [
                 payId, targetInvoiceId, targetInvoiceNo, vId, vName,
-                paidAmount, pDate, paymentMethod, referenceId, req.user?.id || null, req.user?.name || 'Admin'
+                paidAmount, pDate, paymentMethod, referenceId, creator.id, creator.name
               ]
             );
           }

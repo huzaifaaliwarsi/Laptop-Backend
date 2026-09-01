@@ -16,7 +16,7 @@ const errorHandler = (err, req, res, next) => {
     return res.status(409).json({
       success: false,
       code: 'FOREIGN_KEY_VIOLATION',
-      message: 'Cannot delete or update this record because it is referenced by other records.',
+      message: err.detail || err.message || 'Related record or user reference could not be found.',
       detail: err.detail
     });
   }

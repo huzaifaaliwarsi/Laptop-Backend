@@ -8,6 +8,11 @@ const requireRole = (...allowedRoles) => {
       });
     }
 
+    // Super Admin has unrestricted master access to all platform routes
+    if (req.user.role === 'super_admin' || req.user.isSuperAdmin) {
+      return next();
+    }
+
     if (!allowedRoles.includes(req.user.role)) {
       return res.status(403).json({
         success: false,
@@ -22,8 +27,8 @@ const requireRole = (...allowedRoles) => {
 
 module.exports = {
   requireRole,
-  requireAdmin: requireRole('admin'),
-  requireSalesOrAdmin: requireRole('admin', 'sales'),
-  requireTechnicianOrAdmin: requireRole('admin', 'technician'),
-  requireAny: requireRole('admin', 'sales', 'technician')
+  requireAdmin: requireRole('admin', 'super_admin'),
+  requireSalesOrAdmin: requireRole('admin', 'sales', 'super_admin'),
+  requireTechnicianOrAdmin: requireRole('admin', 'technician', 'super_admin'),
+  requireAny: requireRole('admin', 'sales', 'technician', 'super_admin')
 };

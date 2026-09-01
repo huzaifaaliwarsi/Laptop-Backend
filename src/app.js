@@ -2,9 +2,12 @@ const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const errorHandler = require('./middleware/errorHandler');
+const { branchContextMiddleware } = require('./middleware/branchContext');
 
 const authRoutes = require('./modules/auth/auth.routes');
+const superAdminRoutes = require('./modules/super-admin/super-admin.routes');
 const staffRoutes = require('./modules/staff/staff.routes');
+const branchesRoutes = require('./modules/branches/branches.routes');
 const categoriesRoutes = require('./modules/categories/categories.routes');
 const settingsRoutes = require('./modules/settings/settings.routes');
 const customersRoutes = require('./modules/customers/customers.routes');
@@ -56,6 +59,7 @@ const corsOptions = {
     'Content-Type',
     'Authorization',
     'X-Requested-With',
+    'X-Branch-Id',
     'Accept',
     'Origin',
     'Cache-Control',
@@ -64,7 +68,7 @@ const corsOptions = {
     'nocache',
     'noCache'
   ],
-  exposedHeaders: ['Content-Length', 'X-Request-Id'],
+  exposedHeaders: ['Content-Length', 'X-Request-Id', 'X-Branch-Id'],
   optionsSuccessStatus: 200
 };
 
@@ -76,8 +80,13 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 
+// Apply dynamic multi-branch connection context middleware
+app.use(branchContextMiddleware);
+
 // Mount API routes
 app.use('/api/auth', authRoutes);
+app.use('/api/super-admin', superAdminRoutes);
+app.use('/api/branches', branchesRoutes);
 app.use('/api/staff', staffRoutes);
 app.use('/api/categories', categoriesRoutes);
 app.use('/api/settings', settingsRoutes);

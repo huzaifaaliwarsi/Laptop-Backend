@@ -2,6 +2,9 @@ const { Pool } = require('pg');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
+const branchManager = require('./branchManager');
+const branchContext = require('../middleware/branchContext');
+
 const poolConfig = process.env.DATABASE_URL
   ? {
       connectionString: process.env.DATABASE_URL,
@@ -21,18 +24,34 @@ const poolConfig = process.env.DATABASE_URL
       connectionTimeoutMillis: 10000,
     };
 
+// Default Branch 1 / Fallback pool
 const pool = new Pool(poolConfig);
 
 pool.on('error', (err) => {
-  console.error('Unexpected error on idle PostgreSQL client', err);
+  console.error('Unexpected error on idle PostgreSQL client (Branch 1)', err);
 });
 
-const query = (text, params) => pool.query(text, params);
+/**
+ * Returns the active request's branch pool, or defaults safely to Branch 1 pool
+ */
+function getActivePool() {
+  try {
+    const store = branchContext.getBranchStore();
+    if (store && store.pool) {
+      return store.pool;
+    }
+  } catch (e) {
+    // Ignore context error and use fallback pool
+  }
+  return pool;
+}
 
-const getClient = () => pool.connect();
+const query = (text, params) => getActivePool().query(text, params);
+
+const getClient = () => getActivePool().connect();
 
 const withTransaction = async (callback) => {
-  const client = await pool.connect();
+  const client = await getActivePool().connect();
   try {
     await client.query('BEGIN');
     const result = await callback(client);
@@ -46,9 +65,34 @@ const withTransaction = async (callback) => {
   }
 };
 
-// Ensure critical columns exist
+// Master DB accessor
+const master = {
+  pool: branchManager.masterPool,
+  query: (text, params) => branchManager.masterPool.query(text, params),
+  getClient: () => branchManager.masterPool.connect(),
+  withTransaction: async (callback) => {
+    const client = await branchManager.masterPool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await callback(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+};
+
+// Initialize Master DB and ensure Branch 1 critical columns exist
 (async () => {
   try {
+    // 1. Initialize Central Master DB
+    await branchManager.initMasterDb();
+
+    // 2. Ensure Branch 1 operational database migrations
     await pool.query(`
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS address TEXT;
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS ntn_cnic VARCHAR(100);
@@ -98,105 +142,89 @@ const withTransaction = async (callback) => {
       ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS category_id INT REFERENCES repair_categories(id) ON DELETE SET NULL;
       ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS category_name VARCHAR(100);
 
-      -- Backfill legacy records if needed
-      UPDATE repair_jobs rj
-      SET category_name = COALESCE(rj.category_name, rj.product_type, 'Laptop')
-      WHERE rj.category_name IS NULL;
+      -- Migration: add device_password and pattern_code to repair_jobs
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS device_password VARCHAR(100);
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS pattern_code VARCHAR(50);
 
-      UPDATE repair_jobs rj
-      SET category_id = rc.id
-      FROM repair_categories rc
-      WHERE rj.category_id IS NULL AND LOWER(rj.category_name) = LOWER(rc.name);
+      -- Migration: Add missing columns to repair_jobs if they do not exist
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS item_type VARCHAR(50) DEFAULT 'Service';
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS customer_email VARCHAR(150);
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS serial_number VARCHAR(100);
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS accessories_received TEXT;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS physical_condition TEXT;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS initial_quotation NUMERIC(18, 2) DEFAULT 0.00;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS advance_paid NUMERIC(18, 2) DEFAULT 0.00;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS warranty_terms TEXT;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS internal_notes TEXT;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS technical_notes TEXT;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS diagnosis_result TEXT;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS customer_approval_status VARCHAR(50) DEFAULT 'Not Required';
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS customer_approval_at TIMESTAMP WITH TIME ZONE;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS approval_channel VARCHAR(50);
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS approved_by_user_id VARCHAR(50);
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS approval_note TEXT;
 
-      -- Add catalog price snapshot and quantity to repair_job_lines
-      ALTER TABLE repair_job_lines ADD COLUMN IF NOT EXISTS catalog_price_snapshot NUMERIC(18, 2);
-      ALTER TABLE repair_job_lines ADD COLUMN IF NOT EXISTS quantity INT DEFAULT 1;
-
-      UPDATE repair_job_lines
-      SET quantity = 1
-      WHERE quantity IS NULL OR quantity <= 0;
-
-      UPDATE repair_job_lines
-      SET catalog_price_snapshot = charges
-      WHERE catalog_price_snapshot IS NULL;
-
-      -- Ensure default standard diagnosis services exist
-      INSERT INTO repair_services (id, code, name, charges, duration, conditions, status, service_type)
-      VALUES 
-        ('SRV-DIAG-01', 'SRV-DIAG-01', 'Standard Laptop Diagnosis & Inspection', 1000.00, '1-2 Hours', 'Complete motherboard, power rails & hardware diagnosis', 'Active', 'diagnosis'),
-        ('SRV-DIAG-02', 'SRV-DIAG-02', 'Chip-Level Power & Logic Board In-Depth Inspection', 1500.00, '1-2 Days', 'Deep oscilloscope & schematic power sequence trace', 'Active', 'diagnosis')
-      ON CONFLICT (id) DO UPDATE SET service_type = EXCLUDED.service_type;
-
-      -- Create dedicated repair_parts table (Spare Parts Inventory)
+      -- Migration: Dedicated workshop repair parts catalogue
       CREATE TABLE IF NOT EXISTS repair_parts (
-        id VARCHAR(50) PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         code VARCHAR(50) UNIQUE NOT NULL,
         name VARCHAR(255) NOT NULL,
-        category VARCHAR(100) NOT NULL DEFAULT 'General',
+        category VARCHAR(100) NOT NULL,
         compatible_models TEXT,
         cost_price NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
         selling_price NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
         current_stock INT NOT NULL DEFAULT 0,
         min_stock_alert INT NOT NULL DEFAULT 2,
-        status VARCHAR(50) NOT NULL DEFAULT 'Active',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
 
-      -- Create dedicated spare_part_categories table
+      -- Migration: Spare part categories table
       CREATE TABLE IF NOT EXISTS spare_part_categories (
         id SERIAL PRIMARY KEY,
         name VARCHAR(100) UNIQUE NOT NULL,
-        code_prefix VARCHAR(20) DEFAULT 'PRT',
-        is_system BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-
-      INSERT INTO spare_part_categories (name, code_prefix, is_system)
-      VALUES
-        ('Screen / Display', 'SCR', TRUE),
-        ('Battery', 'BAT', TRUE),
-        ('Keyboard', 'KB', TRUE),
-        ('Motherboard IC', 'IC', TRUE),
-        ('Cooling / Fan', 'FAN', TRUE),
-        ('Power Port / Jack', 'JCK', TRUE),
-        ('Thermal Paste', 'THP', TRUE),
-        ('RAM / Memory', 'RAM', TRUE),
-        ('Storage / SSD', 'SSD', TRUE),
-        ('Hinges & Casing', 'HNG', TRUE),
-        ('Flex Cable & Connector', 'FLX', TRUE),
-        ('Camera / Speaker / Wi-Fi', 'MOD', TRUE),
-        ('Other Spare Part', 'PRT', TRUE)
-      ON CONFLICT (name) DO NOTHING;
-
-      -- Create repair_parts_movements table (Stock Movement Ledger for Spare Parts)
-      CREATE TABLE IF NOT EXISTS repair_parts_movements (
-        id SERIAL PRIMARY KEY,
-        part_id VARCHAR(50) REFERENCES repair_parts(id) ON DELETE CASCADE,
-        part_code VARCHAR(50),
-        part_name VARCHAR(255),
-        direction VARCHAR(10) NOT NULL CHECK (direction IN ('IN', 'OUT')),
-        quantity INT NOT NULL,
-        reason TEXT,
-        reference_type VARCHAR(100),
-        reference_id VARCHAR(100),
-        balance_after INT,
-        performed_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
-        performed_by_name VARCHAR(255),
+        description TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
 
-      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS approval_source VARCHAR(50);
-      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS declined_at TIMESTAMP WITH TIME ZONE;
+      -- Seed baseline categories if empty
+      INSERT INTO spare_part_categories (name, description) VALUES
+        ('Screen / LCD', 'Replacement display panels and digitizers'),
+        ('Battery', 'OEM and compatible batteries'),
+        ('Keyboard', 'Internal and external keyboards'),
+        ('Motherboard', 'Main logic boards and daughterboards'),
+        ('Charging Port', 'DC jacks and USB-C charging flex'),
+        ('Camera', 'Front and rear camera modules'),
+        ('Speaker', 'Earpiece and loud speaker modules'),
+        ('Housing', 'Back glass, frames, and bezels'),
+        ('Storage', 'Internal SSDs, eMMC, and flash modules'),
+        ('RAM', 'SO-DIMM and laptop memory sticks'),
+        ('Cooling Fan', 'CPU/GPU cooling fans and heatsinks'),
+        ('Power Supply', 'Internal power boards and adapters')
+      ON CONFLICT (name) DO NOTHING;
 
-      -- Create repair_additional_work_requests table (Additional Fault Approval Engine)
+      -- Migration: Spare parts inventory movements audit trail
+      CREATE TABLE IF NOT EXISTS repair_parts_movements (
+        id SERIAL PRIMARY KEY,
+        part_id VARCHAR(50) NOT NULL REFERENCES repair_parts(id) ON DELETE CASCADE,
+        type VARCHAR(50) NOT NULL,
+        quantity INT NOT NULL,
+        reference_type VARCHAR(50),
+        reference_id VARCHAR(100),
+        notes TEXT,
+        created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_repair_parts_code ON repair_parts(code);
+      CREATE INDEX IF NOT EXISTS idx_repair_parts_category ON repair_parts(category);
+
+      -- Migration: Formal customer approval workflow for additional quotation / newly found faults
       CREATE TABLE IF NOT EXISTS repair_additional_work_requests (
-        id VARCHAR(50) PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         repair_job_id VARCHAR(50) NOT NULL REFERENCES repair_jobs(id) ON DELETE CASCADE,
-        tracking_id VARCHAR(50) NOT NULL,
-        fault_finding TEXT NOT NULL,
-        recommended_service TEXT NOT NULL,
+        diagnosed_fault TEXT NOT NULL,
+        recommended_action TEXT NOT NULL,
         service_charge NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
         parts_charge NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
         total_quotation NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
@@ -218,6 +246,11 @@ const withTransaction = async (callback) => {
 
       CREATE INDEX IF NOT EXISTS idx_addl_work_repair_job ON repair_additional_work_requests(repair_job_id);
       CREATE INDEX IF NOT EXISTS idx_addl_work_status ON repair_additional_work_requests(status);
+
+      -- Migration: Operational role cleanup (Branch users can only be admin, sales, technician)
+      UPDATE users SET role = 'admin' WHERE role = 'super_admin' OR role = 'Super Admin';
+      ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+      ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'sales', 'technician'));
     `);
   } catch (err) {
     console.error('[DB Init] Column check error:', err.message);
@@ -229,5 +262,6 @@ module.exports = {
   query,
   getClient,
   withTransaction,
+  master,
+  getActivePool,
 };
-

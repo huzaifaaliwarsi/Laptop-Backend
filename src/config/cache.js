@@ -184,9 +184,33 @@ function cacheRoute(ttlSeconds = 60, customKeyFn = null) {
       return next();
     }
 
+    const { getBranchStore } = require('../middleware/branchContext');
+    const branchStore = getBranchStore();
+
+    // Derive verified branch scope strictly from authenticated execution context
+    let branchScope = null;
+    if (req.user?.isSuperAdmin || branchStore?.isSuperAdmin) {
+      if (req.headers['x-branch-id']) {
+        const headerBId = parseInt(req.headers['x-branch-id'], 10);
+        branchScope = !isNaN(headerBId) ? `branch_${headerBId}` : 'sa_all';
+      } else {
+        branchScope = 'sa_all';
+      }
+    } else {
+      const verifiedBranchId = branchStore?.branchId || req.user?.branchId || req.branchId;
+      if (!verifiedBranchId) {
+        // If no verified branch context exists, bypass caching to prevent cross-branch leakage
+        return next();
+      }
+      branchScope = `branch_${verifiedBranchId}`;
+    }
+
+    const role = req.user?.role || 'anon';
+    const userId = req.user?.id || 'anon';
+
     const key = customKeyFn
       ? customKeyFn(req)
-      : `route:${req.baseUrl}${req.path}:${JSON.stringify(req.query)}:${req.user?.role || 'anon'}`;
+      : `route:${branchScope}:${req.baseUrl || ''}${req.path || ''}:${JSON.stringify(req.query || {})}:${role}:${userId}`;
 
     try {
       const cached = await CacheService.get(key);

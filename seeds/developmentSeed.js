@@ -71,7 +71,7 @@ async function runSeed() {
     // 5. Default Staff Users (hashed passwords)
     const salt = await bcrypt.genSalt(10);
     const users = [
-      { id: 'EMP-0001', name: 'Super Admin', contact: '03343964852', designation: 'Owner / Super Admin', role: 'admin', username: 'admin', password: 'admin' },
+      { id: 'EMP-0001', name: 'Admin', contact: '03343964852', designation: 'Branch Administrator', role: 'admin', username: 'admin', password: 'admin' },
       { id: 'EMP-0002', name: 'Ali Faisal', contact: '03148843707', designation: 'Sales Executive', role: 'sales', username: 'sales', password: 'sales123' },
       { id: 'EMP-0003', name: 'Nabeel Faisal', contact: '03001234001', designation: 'Senior Technician', role: 'technician', username: 'tech', password: 'tech123' },
       { id: 'EMP-0004', name: 'Hamza Ahmed', contact: '03001234002', designation: 'Repair Technician', role: 'technician', username: 'tech2', password: 'tech456' }

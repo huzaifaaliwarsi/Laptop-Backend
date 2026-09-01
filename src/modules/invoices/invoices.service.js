@@ -34,6 +34,14 @@ function normalizeInvoiceRow(row) {
   };
 }
 
+function getCreator(user) {
+  const isSuper = user?.role === 'super_admin' || user?.isSuperAdmin;
+  return {
+    id: isSuper ? null : (user?.id || null),
+    name: user?.name || (isSuper ? 'Platform Super Admin' : (user?.username || 'Staff'))
+  };
+}
+
 class InvoiceService {
   /**
    * Complete atomic POS retail sale
@@ -220,6 +228,8 @@ class InvoiceService {
         throw error;
       }
 
+      const creator = getCreator(user);
+
       // Insert invoice
       const invoiceRes = await client.query(
         `INSERT INTO invoices (
@@ -234,7 +244,7 @@ class InvoiceService {
         [
           invoiceId, invoiceNo, date || new Date(), customerId, cleanName, cleanContact,
           productTotal, serviceTotal, total, paid, balance, pMethod,
-          referenceId ? referenceId.trim() : null, payStatus, user.id, user.name
+          referenceId ? referenceId.trim() : null, payStatus, creator.id, creator.name
         ]
       );
 
@@ -267,7 +277,7 @@ class InvoiceService {
           )`,
           [
             payId, invoiceId, invoiceNo, customerId, cleanName,
-            paid, date || new Date(), pMethod, referenceId || null, user.id, user.name
+            paid, date || new Date(), pMethod, referenceId || null, creator.id, creator.name
           ]
         );
       }
@@ -349,6 +359,7 @@ class InvoiceService {
       const invoiceNo = await getNextInvoiceNo('vendor_purchase', client);
       const invoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
       const payStatus = paymentStatus(total, paid);
+      const creator = getCreator(user);
 
       const invoiceRes = await client.query(
         `INSERT INTO invoices (
@@ -363,7 +374,7 @@ class InvoiceService {
         [
           invoiceId, invoiceNo, date || new Date(), vendorId, cleanName, cleanContact,
           total, total, paid, paid, balance, pMethod,
-          referenceId || null, payStatus, user.id, user.name
+          referenceId || null, payStatus, creator.id, creator.name
         ]
       );
 
@@ -412,7 +423,7 @@ class InvoiceService {
           )`,
           [
             payId, invoiceId, invoiceNo, vendorId, cleanName,
-            paid, date || new Date(), pMethod, referenceId || null, user.id, user.name
+            paid, date || new Date(), pMethod, referenceId || null, creator.id, creator.name
           ]
         );
       }

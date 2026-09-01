@@ -21,7 +21,8 @@ router.get('/', async (req, res, next) => {
     const params = [];
 
     // Role-scoping: non-admins only see their own entries
-    if (req.user.role !== 'admin') {
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin' || req.user.isSuperAdmin;
+    if (!isAdmin) {
       params.push(req.user.id);
       queryText += ` AND e.created_by = $${params.length}`;
     } else if (staffId) {
@@ -124,6 +125,9 @@ router.post('/', async (req, res, next) => {
 
     const expId = await getNextEntityId('expenses', 'id', 'EXP', 5);
 
+    const creatorId = (req.user.role === 'super_admin' || req.user.isSuperAdmin) ? null : req.user.id;
+    const creatorName = req.user.name || (req.user.role === 'super_admin' ? 'Platform Super Admin' : (req.user.username || 'Staff'));
+
     const insertRes = await db.query(
       `INSERT INTO expenses (
         id, date, category_id, category_name, description, amount, payment_method,
@@ -140,8 +144,8 @@ router.post('/', async (req, res, next) => {
         pMethod,
         referenceId ? referenceId.trim() : null,
         linkedTrackingId ? linkedTrackingId.trim() : null,
-        req.user.id,
-        req.user.name
+        creatorId,
+        creatorName
       ]
     );
 
@@ -175,7 +179,7 @@ router.put('/:id', async (req, res, next) => {
     const existing = existingRes.rows[0];
 
     // Non-admins can only edit their own entries
-    if (req.user.role !== 'admin' && existing.created_by !== req.user.id) {
+    if (req.user.role !== 'admin' && req.user.role !== 'super_admin' && existing.created_by !== req.user.id) {
       return res.status(403).json({
         success: false,
         code: 'FORBIDDEN',
@@ -241,7 +245,8 @@ router.delete('/:id', async (req, res, next) => {
       });
     }
 
-    if (req.user.role !== 'admin' && existingRes.rows[0].created_by !== req.user.id) {
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin' || req.user.isSuperAdmin;
+    if (!isAdmin && existingRes.rows[0].created_by !== req.user.id) {
       return res.status(403).json({
         success: false,
         code: 'FORBIDDEN',

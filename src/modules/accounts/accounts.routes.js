@@ -5,6 +5,7 @@ const authenticateToken = require('../../middleware/auth');
 const { requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
 const { getAvailableBalance, validateOutflow } = require('../../utils/financialFormulas');
+const { getCreator } = require('../../utils/userHelper');
 const { emitEvent } = require('../../config/socket');
 
 router.use(authenticateToken);
@@ -43,6 +44,7 @@ router.post('/drawer-transaction', requireSalesOrAdmin, async (req, res, next) =
     const isDeposit = type === 'Deposit' || type === 'Cash In' || type === 'Add';
     const direction = isDeposit ? 'Received' : 'Paid';
 
+    const creator = getCreator(req.user);
     const payId = await getNextEntityId('payments', 'id', 'PAY', 5);
     const result = await db.query(`
       INSERT INTO payments (
@@ -58,7 +60,7 @@ router.post('/drawer-transaction', requireSalesOrAdmin, async (req, res, next) =
       payId, isDeposit ? 'Drawer Deposit' : 'Drawer Withdrawal',
       direction, amount, date || new Date(), pMethod, null,
       notes ? notes.trim() : (isDeposit ? `${pMethod} Drawer Deposit / Cash In` : `${pMethod} Drawer Withdrawal / Cash Out`),
-      req.user.id, req.user.name
+      creator.id, creator.name
     ]);
 
     const newCash = await getAvailableBalance('Cash');
@@ -241,6 +243,7 @@ router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
             [jobNewPaid, job.id]
           );
 
+          const creator = getCreator(req.user);
           await client.query(
             `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
              VALUES ($1, $2, $3, $4, $5)`,
@@ -248,8 +251,8 @@ router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
               job.id,
               job.status,
               `Payment received: PKR ${payAmount.toLocaleString('en-PK', { maximumFractionDigits: 2 })} via ${pMethod}. Remaining: PKR ${newRemaining.toLocaleString('en-PK', { maximumFractionDigits: 2 })}.`,
-              req.user.id,
-              req.user.name
+              creator.id,
+              creator.name
             ]
           );
         }
@@ -270,6 +273,7 @@ router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
       }
 
       // Record payment row
+      const creator = getCreator(req.user);
       const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
       const direction = account.type.includes('Receivable') ? 'Received' : 'Paid';
 
@@ -286,7 +290,7 @@ router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
         [
           payId, id, account.invoice_id, account.invoice_no, account.party_type, account.party_id, account.party_name,
           account.type, direction, payAmount, date || new Date(), pMethod, referenceId ? referenceId.trim() : null, notes ? notes.trim() : null,
-          req.user.id, req.user.name
+          creator.id, creator.name
         ]
       );
 

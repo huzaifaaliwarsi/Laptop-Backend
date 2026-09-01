@@ -5,6 +5,7 @@ const InvoiceService = require('./invoices.service');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
+const { getCreator } = require('../../utils/userHelper');
 const { emitEvent } = require('../../config/socket');
 const { CacheService, cacheRoute } = require('../../config/cache');
 
@@ -17,9 +18,10 @@ router.get('/', cacheRoute(60), async (req, res, next) => {
     let queryText = 'SELECT * FROM invoices WHERE 1=1';
     const params = [];
 
-    // Role scoping: Sales staff only see their own invoices if requested
+    // Role scoping: Sales staff only see their own invoices
     if (req.user.role === 'sales') {
-      // In sales purchases page they see all, or scoped
+      params.push(req.user.id);
+      queryText += ` AND created_by = $${params.length}`;
     }
 
     if (search && String(search).trim() !== '') {
@@ -204,7 +206,8 @@ router.get('/held-bills', requireSalesOrAdmin, async (req, res, next) => {
     let query = `SELECT * FROM held_bills`;
     const params = [];
 
-    if (req.user.role !== 'admin') {
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin' || req.user.isSuperAdmin;
+    if (!isAdmin) {
       query += ` WHERE created_by = $1`;
       params.push(req.user.id);
     }
@@ -235,13 +238,14 @@ router.post('/held-bills', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const { id, type, label, partyName, total, payload } = req.body;
     let holdId = id;
+    const creator = getCreator(req.user);
 
     if (!holdId) {
       holdId = await getNextEntityId('held_bills', 'id', 'HLD', 5);
       await db.query(
         `INSERT INTO held_bills (id, type, label, party_name, total, payload, created_by, created_by_name)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [holdId, type, label, partyName || 'Walk-in', parseFloat(total || 0), payload || {}, req.user.id, req.user.name]
+        [holdId, type, label, partyName || 'Walk-in', parseFloat(total || 0), payload || {}, creator.id, creator.name]
       );
     } else {
       await db.query(
@@ -270,7 +274,8 @@ router.delete('/held-bills/:id', requireSalesOrAdmin, async (req, res, next) => 
     let delQuery = 'DELETE FROM held_bills WHERE id = $1';
     const params = [id];
 
-    if (req.user.role !== 'admin') {
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin' || req.user.isSuperAdmin;
+    if (!isAdmin) {
       delQuery += ' AND created_by = $2';
       params.push(req.user.id);
     }
@@ -296,6 +301,15 @@ router.get('/:id', cacheRoute(60), async (req, res, next) => {
         success: false,
         code: 'NOT_FOUND',
         message: 'Invoice not found.'
+      });
+    }
+
+    // Role scoping: Sales staff can only view their own invoices
+    if (req.user.role === 'sales' && invoice.createdById !== req.user.id && invoice.created_by !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        code: 'FORBIDDEN',
+        message: 'Access restricted to your own sales invoices.'
       });
     }
 

@@ -35,6 +35,14 @@ function simpleRepairType(job) {
   return isDiag ? 'Diagnosis Job' : 'Service Job';
 }
 
+function getCreator(user) {
+  const isSuper = user?.role === 'super_admin' || user?.isSuperAdmin;
+  return {
+    id: isSuper ? null : (user?.id || null),
+    name: user?.name || (isSuper ? 'Platform Super Admin' : (user?.username || 'Staff'))
+  };
+}
+
 class RepairService {
   /**
    * Recalculates and synchronizes linked invoice and receivable accounts
@@ -433,6 +441,8 @@ class RepairService {
       const repairId = await getNextEntityId('repair_jobs', 'id', 'REP', 5, client);
       const initialStatus = isDiag ? 'Diagnosis Received' : 'Job Received';
 
+      const creator = getCreator(user);
+
       const jobRes = await client.query(
         `INSERT INTO repair_jobs (
           id, tracking_id, job_type, origin_job_type, date, customer_id, customer_name, contact,
@@ -452,7 +462,7 @@ class RepairService {
           extraAmt, isDiag ? null : (extraReason ? extraReason.trim() : null), total, paid, paid, paymentMethod || 'Cash',
           paymentReference ? paymentReference.trim() : null, remarks ? remarks.trim() : null, initialStatus,
           isDiag ? (cleanLines[0]?.duration || '1-2 Hours') : (duration || null), expectedCompletion || null,
-          isDiag ? diagFee : 0, user.id, user.name
+          isDiag ? diagFee : 0, creator.id, creator.name
         ]
       );
 
@@ -469,7 +479,7 @@ class RepairService {
       await client.query(
         `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
          VALUES ($1, $2, $3, $4, $5)`,
-        [repairId, initialStatus, isDiag ? `Diagnosis Job received for ${categoryName} and assigned to ${techName}` : `Service Job created for ${categoryName} and assigned to ${techName}`, user.id, user.name]
+        [repairId, initialStatus, isDiag ? `Diagnosis Job received for ${categoryName} and assigned to ${techName}` : `Service Job created for ${categoryName} and assigned to ${techName}`, creator.id, creator.name]
       );
 
       // If initial payment paid
@@ -489,7 +499,7 @@ class RepairService {
             payId, trackingId, customerId, cleanName,
             paid, date || new Date(), paymentMethod || 'Cash', paymentReference || null,
             isDiag ? 'Diagnosis fee advance payment' : 'Initial repair job advance payment',
-            user.id, user.name
+            creator.id, creator.name
           ]
         );
       }

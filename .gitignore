@@ -10,6 +10,10 @@ logs/
 *.log
 npm-debug.log*
 
+# Auth & Sessions
+whatsapp_auth_session/
+scratch/
+
 # Editor & OS
 .DS_Store
 .idea/
