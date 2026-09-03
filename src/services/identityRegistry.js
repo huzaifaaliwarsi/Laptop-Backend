@@ -157,12 +157,12 @@ async function reserveIdentity({ branchId, username, phone, role, status = 'Acti
       if (detail.includes('normalized_phone') || err.constraint === 'uq_master_staff_phone') {
         throw new IdentityConflictError(
           'PHONE_ALREADY_EXISTS',
-          'Phone number is already registered in another branch.'
+          'This user already exists: Phone number is already registered with another staff member.'
         );
       }
       throw new IdentityConflictError(
         'USERNAME_ALREADY_EXISTS',
-        'Username already exists in another branch. Please choose a different username.'
+        'This user already exists: Username is already taken. Please choose a different username.'
       );
     }
     throw err;
@@ -268,7 +268,7 @@ async function updateIdentity({ branchId, branchUserId, currentUsername, usernam
   if (userCheck.rows.length > 0) {
     throw new IdentityConflictError(
       'USERNAME_ALREADY_EXISTS',
-      'Username already exists in another branch. Please choose a different username.'
+      'This user already exists: Username is already taken. Please choose a different username.'
     );
   }
 
@@ -281,7 +281,7 @@ async function updateIdentity({ branchId, branchUserId, currentUsername, usernam
     if (phoneCheck.rows.length > 0) {
       throw new IdentityConflictError(
         'PHONE_ALREADY_EXISTS',
-        'Phone number is already registered in another branch.'
+        'This user already exists: Phone number is already registered with another staff member.'
       );
     }
   }

@@ -106,6 +106,19 @@ router.put('/company', authenticateToken, requireAdmin, async (req, res, next) =
       logoData || null       // $12 = logo_data
     ]);
 
+    // Also sync branch name and contact info to master_branches so all listings remain unified
+    try {
+      const branchManager = require('../../config/branchManager');
+      const bId = getBranchIdFromReq(req);
+      await branchManager.masterPool.query(`
+        UPDATE master_branches 
+        SET branch_name = $1, phone = COALESCE($2, phone), email = COALESCE($3, email), address = COALESCE($4, address), updated_at = CURRENT_TIMESTAMP
+        WHERE id = $5
+      `, [companyName.trim(), phone ? phone.trim() : null, email ? email.trim() : null, address ? address.trim() : null, bId]);
+    } catch (syncErr) {
+      console.warn('[Settings] Failed to sync to master_branches:', syncErr.message);
+    }
+
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/settings*');
     emitEvent('settings.company_updated', updateRes.rows[0]);
 

@@ -44,7 +44,8 @@ router.get('/', cacheRoute(120), async (req, res, next) => {
 router.post('/', requireAdmin, async (req, res, next) => {
   let reservation = null;
   try {
-    const { name, contact, designation, role, username, password, status } = req.body;
+    const { name, contact, phone, designation, role, username, password, status } = req.body;
+    const staffContact = contact !== undefined ? contact : phone;
 
     if (!name || !username || !password || !role) {
       return res.status(400).json({
@@ -63,22 +64,48 @@ router.post('/', requireAdmin, async (req, res, next) => {
       });
     }
 
-    if (contact && !isValidPhone(contact)) {
+    if (staffContact && !isValidPhone(staffContact)) {
       return res.status(400).json({
         success: false,
         code: 'INVALID_PHONE',
-        message: 'Please provide a valid phone number.'
+        message: 'Please provide a valid phone number (e.g. 03001234567).'
       });
     }
 
     const branchId = req.user?.branchId || req.branchId || 1;
+
+    // STEP 0: Immediate local branch database check to prevent duplicate username or phone
+    const localConflict = await db.query(
+      `SELECT id, username, contact FROM users 
+       WHERE LOWER(username) = $1 
+          OR (contact IS NOT NULL AND contact != '' AND contact = $2)
+       LIMIT 1`,
+      [cleanUsername, staffContact ? String(staffContact).trim() : '___NO_PHONE___']
+    );
+    if (localConflict.rows.length > 0) {
+      const match = localConflict.rows[0];
+      if (match.username && match.username.toLowerCase() === cleanUsername) {
+        return res.status(409).json({
+          success: false,
+          code: 'USERNAME_ALREADY_EXISTS',
+          message: 'This user already exists: Username is already taken. Please choose a different username.'
+        });
+      }
+      if (staffContact && match.contact && match.contact === String(staffContact).trim()) {
+        return res.status(409).json({
+          success: false,
+          code: 'PHONE_ALREADY_EXISTS',
+          message: 'This user already exists: Phone number is already registered with another staff member.'
+        });
+      }
+    }
 
     // STEP 1: Reserve identity globally in Master DB using atomic UNIQUE constraints
     try {
       reservation = await identityRegistry.reserveIdentity({
         branchId,
         username: cleanUsername,
-        phone: contact,
+        phone: staffContact,
         role,
         status: status || 'Active'
       });
@@ -87,7 +114,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         return res.status(409).json({
           success: false,
           code: regErr.code,
-          message: regErr.message
+          message: regErr.message || (regErr.code === 'PHONE_ALREADY_EXISTS'
+            ? 'This user already exists: Phone number is already registered with another staff member.'
+            : 'This user already exists: Username is already taken. Please choose a different username.')
         });
       }
       throw regErr;
@@ -106,7 +135,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         [
           staffId,
           name.trim(),
-          reservation.normalizedPhone || (contact ? contact.trim() : null),
+          reservation.normalizedPhone || (staffContact ? String(staffContact).trim() : null),
           designation ? designation.trim() : null,
           role,
           cleanUsername,
@@ -138,6 +167,21 @@ router.post('/', requireAdmin, async (req, res, next) => {
           reservationToken: reservation.reservationToken
         });
       }
+      if (branchDbErr.code === '23505') {
+        const detail = String(branchDbErr.detail || branchDbErr.message || '');
+        if (detail.includes('contact') || branchDbErr.constraint?.includes('contact')) {
+          return res.status(409).json({
+            success: false,
+            code: 'PHONE_ALREADY_EXISTS',
+            message: 'This user already exists: Phone number is already registered with another staff member.'
+          });
+        }
+        return res.status(409).json({
+          success: false,
+          code: 'USERNAME_ALREADY_EXISTS',
+          message: 'This user already exists: Username is already taken. Please choose a different username.'
+        });
+      }
       throw branchDbErr;
     }
   } catch (error) {
@@ -152,7 +196,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
   const { id } = req.params;
 
   try {
-    const { name, contact, designation, role, username, password, status } = req.body;
+    const { name, contact, phone, designation, role, username, password, status } = req.body;
 
     const existing = await db.query('SELECT id, role, username, contact, status FROM users WHERE id = $1', [id]);
     if (existing.rows.length === 0) {
@@ -164,7 +208,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     }
 
     const cleanUsername = username ? normalizeUsername(username) : existing.rows[0].username;
-    const targetContact = contact !== undefined ? contact : existing.rows[0].contact;
+    const targetContact = contact !== undefined ? contact : (phone !== undefined ? phone : existing.rows[0].contact);
 
     if (targetContact && !isValidPhone(targetContact)) {
       return res.status(400).json({

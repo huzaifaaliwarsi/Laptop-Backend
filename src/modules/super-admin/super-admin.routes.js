@@ -441,7 +441,20 @@ router.get(['/dashboard', '/reports/consolidated'], requireSuperAdmin, cacheRout
       },
       data: {
         combined,
-        branches: branchReports
+        branches: branchReports,
+        allBranches: branches.map(b => ({
+          branchId: b.id,
+          branchCode: b.branch_code,
+          branchName: b.branch_name,
+          city: b.city,
+          address: b.address,
+          phone: b.phone,
+          email: b.email,
+          status: b.status,
+          adminName: b.admin_name,
+          adminUsername: b.admin_username,
+          createdAt: b.created_at
+        }))
       }
     });
   } catch (error) {
@@ -459,6 +472,81 @@ router.get('/branches', requireSuperAdmin, cacheRoute(60), async (req, res, next
       totalBranches: branches.length,
       maxAllowed: 2,
       canAddMore: branches.length < 2
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/super-admin/branches/:id — Real-time branch profile details from database & business settings (No stale cache)
+router.get('/branches/:id', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const branchId = parseInt(req.params.id, 10);
+    if (isNaN(branchId)) {
+      return res.status(400).json({ success: false, message: 'Invalid branch ID.' });
+    }
+
+    const branch = await branchManager.getBranchById(branchId);
+    if (!branch) {
+      return res.status(404).json({ success: false, message: `Branch with ID ${branchId} not found.` });
+    }
+
+    let branchSettings = null;
+    let branchAdmin = null;
+
+    try {
+      const pool = await branchManager.getBranchPool(branchId, true);
+      // Fetch live business settings configured from the Settings page
+      const settingsRes = await pool.query(`
+        SELECT company_name, tagline, invoice_subtitle, phone, email, address, tax_number, ntn, strn, pos_id, updated_at
+        FROM business_settings
+        WHERE id = 1
+        LIMIT 1
+      `);
+      if (settingsRes.rows.length > 0) {
+        branchSettings = settingsRes.rows[0];
+      }
+
+      // Fetch primary branch admin user if available
+      const adminRes = await pool.query(`
+        SELECT name, username
+        FROM users
+        WHERE role = 'admin'
+        ORDER BY created_at ASC
+        LIMIT 1
+      `);
+      if (adminRes.rows.length > 0) {
+        branchAdmin = adminRes.rows[0];
+      }
+    } catch (poolErr) {
+      console.warn(`[SuperAdmin] Could not query branch ${branchId} settings:`, poolErr.message);
+    }
+
+    // Merge: business_settings configured via the Settings page takes priority for address, phone, email & branch name
+    const effectiveBranch = {
+      id: branch.id,
+      branch_code: branch.branch_code,
+      branch_name: branchSettings?.company_name || branch.branch_name,
+      tagline: branchSettings?.tagline || '',
+      invoice_subtitle: branchSettings?.invoice_subtitle || '',
+      admin_name: branchAdmin?.name || branch.admin_name,
+      admin_username: branchAdmin?.username || branch.admin_username,
+      status: branch.status || 'Active',
+      city: branch.city,
+      phone: branchSettings?.phone || branch.phone,
+      email: branchSettings?.email || branch.email,
+      address: branchSettings?.address || branch.address,
+      tax_number: branchSettings?.tax_number || branchSettings?.ntn || '',
+      ntn: branchSettings?.ntn || branchSettings?.tax_number || '',
+      strn: branchSettings?.strn || '',
+      pos_id: branchSettings?.pos_id || '',
+      created_at: branch.created_at,
+      updated_at: branchSettings?.updated_at || branch.updated_at
+    };
+
+    return res.json({
+      success: true,
+      data: effectiveBranch
     });
   } catch (error) {
     next(error);
@@ -698,6 +786,35 @@ router.get('/audit-logs', requireSuperAdmin, cacheRoute(30), async (req, res, ne
       total: parseInt(countRes.rows[0]?.total || 0, 10),
       limit,
       offset
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/super-admin/audit-logs — Purge master audit logs
+router.delete('/audit-logs', requireSuperAdmin, async (req, res, next) => {
+  try {
+    await branchManager.masterPool.query('DELETE FROM master_audit_logs');
+
+    // Clear route cache if present
+    if (global.routeCache && typeof global.routeCache.flushAll === 'function') {
+      global.routeCache.flushAll();
+    }
+
+    // Insert a fresh initialization log
+    await branchManager.masterPool.query(`
+      INSERT INTO master_audit_logs (action, details, performed_by)
+      VALUES ($1, $2, $3)
+    `, [
+      'AUDIT_LOGS_PURGED',
+      JSON.stringify({ note: 'Audit log history cleared by Super Admin.' }),
+      req.user?.username || 'superadmin'
+    ]);
+
+    return res.json({
+      success: true,
+      message: 'Audit logs cleared successfully.'
     });
   } catch (error) {
     next(error);

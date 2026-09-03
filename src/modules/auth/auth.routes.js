@@ -42,7 +42,7 @@ router.post('/login', async (req, res, next) => {
       const isMatch = await bcrypt.compare(password, sa.password_hash);
       if (isMatch) {
         const branches = await branchManager.listBranches();
-        const primaryBranch = branches[0] || { id: 1, branch_code: 'BR-01', branch_name: 'Saad Communication (Main Branch)' };
+        const primaryBranch = branches[0] || { id: 1, branch_code: 'BR-01', branch_name: 'Saad Communication' };
 
         const token = jwt.sign(
           {
@@ -245,7 +245,7 @@ router.get('/me', async (req, res) => {
             role: 'super_admin',
             isSuperAdmin: true
           },
-          branch: activeBranch || { id: 1, branch_code: 'BR-01', branch_name: 'Main Branch (Branch 1)' }
+          branch: activeBranch || { id: 1, branch_code: 'BR-01', branch_name: 'Saad Communication' }
         }
       });
     }
@@ -266,7 +266,7 @@ router.get('/me', async (req, res) => {
       success: true,
       data: {
         user: userRes.rows[0],
-        branch: activeBranch || { id: 1, branch_code: 'BR-01', branch_name: 'Main Branch (Branch 1)' }
+        branch: activeBranch || { id: 1, branch_code: 'BR-01', branch_name: 'Saad Communication' }
       }
     });
   } catch (error) {
