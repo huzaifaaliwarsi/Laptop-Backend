@@ -255,6 +255,19 @@ class RepairService {
       );
 
       emitEvent('whatsapp.message_added', { conversationId: convId, text: messageText });
+
+      // Dispatch live message to WhatsApp via Baileys if connected
+      try {
+        const baileys = require('../whatsapp/baileys.service');
+        if (baileys.isConnected) {
+          await baileys.sendTextMessage(cleanContact, messageText);
+          console.log(`[Baileys] Successfully sent automated WhatsApp message to ${cleanContact}`);
+        } else {
+          console.log(`[Baileys] WhatsApp device not currently connected; logged in CRM.`);
+        }
+      } catch (waErr) {
+        console.error('[Baileys] Error sending WhatsApp message to customer:', waErr.message);
+      }
     } catch (err) {
       console.error('[WhatsApp Auto Notify Error]:', err);
     }
@@ -438,7 +451,8 @@ class RepairService {
       }
 
       const trackingId = await getNextTrackingId(client);
-      const repairId = await getNextEntityId('repair_jobs', 'id', 'REP', 5, client);
+      const numPart = trackingId.split('-')[1] || String(Date.now()).slice(-5);
+      const repairId = `REP-${numPart}`;
       const initialStatus = isDiag ? 'Diagnosis Received' : 'Job Received';
 
       const creator = getCreator(user);
@@ -1770,6 +1784,17 @@ class RepairService {
         );
 
         emitEvent('whatsapp.message_added', { conversationId: convId, text: approvalMsg });
+
+        // Dispatch live message to WhatsApp via Baileys if connected
+        try {
+          const baileys = require('../whatsapp/baileys.service');
+          if (baileys.isConnected) {
+            await baileys.sendTextMessage(job.contact, approvalMsg);
+            console.log(`[Baileys] Sent additional work quote to customer ${job.contact}`);
+          }
+        } catch (waErr) {
+          console.error('[Baileys] Error sending additional work approval WhatsApp:', waErr.message);
+        }
       }
 
       // Log in repair status history

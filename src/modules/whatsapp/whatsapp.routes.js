@@ -456,12 +456,25 @@ router.post('/messages/send', async (req, res, next) => {
       [conversationId, text.trim(), tag || 'agent']
     );
 
-    await db.query(
-      `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+    const convRes = await db.query(
+      `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING contact`,
       [text.trim(), conversationId]
     );
 
     emitEvent('whatsapp.message_added', { conversationId, text: text.trim() });
+
+    // Send via live WhatsApp if connected
+    if (convRes.rows.length > 0 && convRes.rows[0].contact) {
+      const contactPhone = convRes.rows[0].contact;
+      try {
+        if (baileys.isConnected) {
+          await baileys.sendTextMessage(contactPhone, text.trim());
+          console.log(`[Baileys] Agent message successfully dispatched to ${contactPhone}`);
+        }
+      } catch (waErr) {
+        console.error('[Baileys] Error dispatching agent message to WhatsApp:', waErr.message);
+      }
+    }
 
     return res.json({
       success: true,
@@ -575,11 +588,13 @@ router.get('/status', (req, res) => {
 // POST /api/whatsapp/connect - Force generate QR code & start connection
 router.post('/connect', async (req, res, next) => {
   try {
-    await baileys.initWhatsApp(true);
+    const status = await baileys.waitForQrOrStatus(9000);
     return res.json({
       success: true,
-      message: 'WhatsApp multi-device connection initiated. Scan the QR code with WhatsApp on your phone.',
-      data: baileys.getStatus()
+      message: status.qr
+        ? 'WhatsApp QR code generated. Please scan with WhatsApp on your mobile device.'
+        : 'WhatsApp connection initiated.',
+      data: status
     });
   } catch (err) {
     next(err);

@@ -56,20 +56,20 @@ function buildIntakeConfirmationTemplate({ job, requestedService = '', isDiagnos
   );
 
   const lines = [
-    isDiagnosis ? '🔧 Diagnosis Order Received' : '🔧 Repair Order Confirmed',
+    isDiagnosis ? '🔧 *Diagnosis Order Received*' : '🔧 *Repair Order Confirmed*',
     '',
-    `📋 Tracking ID: ${trackingId}`,
-    `📱 Device: ${device}`,
-    `🔧 Requested Service: ${serviceName}`,
-    `📋 Status: ${status}`
+    `📋 *Tracking ID:* ${trackingId}`,
+    `📱 *Device:* ${device}`,
+    `🔧 *Service:* ${serviceName}`,
+    `📋 *Status:* ${status}`
   ];
 
   if (expected) {
-    lines.push(`📅 Expected Completion: ${expected}`);
+    lines.push(`📅 *Expected:* ${expected}`);
   }
 
   lines.push('');
-  lines.push(`Send ${trackingId} anytime for live status.`);
+  lines.push(`Apne device ka live status jan'ne ke liye kisi bhi waqt *${trackingId}* send karein.`);
 
   return lines.join('\n');
 }
@@ -137,28 +137,28 @@ function buildStatusUpdateTemplate({ job, safeNote = '' }) {
   const balance = Math.max(0, total - paid);
 
   const lines = [
-    '📋 Repair Status Update',
+    '📋 *Repair Status Update*',
     '',
-    `📋 Tracking ID: ${trackingId}`,
-    `📱 Device: ${device}`,
-    `📋 Status: ${status}`
+    `📋 *Tracking ID:* ${trackingId}`,
+    `📱 *Device:* ${device}`,
+    `📋 *Status:* ${status}`
   ];
 
   if (expected) {
-    lines.push(`📅 Expected Completion: ${expected}`);
+    lines.push(`📅 *Expected Completion:* ${expected}`);
   }
 
-  lines.push(`💳 Total: ${formatMoney(total)}`);
-  lines.push(`💳 Paid: ${formatMoney(paid)}`);
-  lines.push(`💳 Balance: ${formatMoney(balance)}`);
+  lines.push(`💳 *Total:* ${formatMoney(total)}`);
+  lines.push(`💳 *Paid:* ${formatMoney(paid)}`);
+  lines.push(`💳 *Balance:* ${formatMoney(balance)}`);
 
   const noteToShow = safeNote || job.final_remarks;
   if (noteToShow && String(noteToShow).trim() !== '') {
-    lines.push(`📋 Note: ${String(noteToShow).trim()}`);
+    lines.push(`📋 *Note:* ${String(noteToShow).trim()}`);
   }
 
   lines.push('');
-  lines.push(`Send ${trackingId} anytime for live status.`);
+  lines.push(`Apne device ka live status jan'ne ke liye kisi bhi waqt *${trackingId}* send karein.`);
 
   return lines.join('\n');
 }

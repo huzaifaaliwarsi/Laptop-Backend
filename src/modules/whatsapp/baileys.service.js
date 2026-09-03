@@ -5,6 +5,16 @@ const fs = require('fs');
 const db = require('../../config/db');
 const { emitEvent } = require('../../config/socket');
 
+// Silence internal libsignal-node noisy debug outputs
+const origStdout = process.stdout.write.bind(process.stdout);
+process.stdout.write = (chunk, encoding, callback) => {
+  if (typeof chunk === 'string' && chunk.includes('Closing session: SessionEntry')) {
+    if (typeof callback === 'function') callback();
+    return true;
+  }
+  return origStdout(chunk, encoding, callback);
+};
+
 // Baileys is an ESM module; dynamically load it on demand
 let baileysModule = null;
 async function getBaileys() {
@@ -52,33 +62,61 @@ class BaileysService {
   }
 
   async initWhatsApp(forceNew = false) {
-    if (this.isConnecting) return;
+    if (this.isConnecting && !forceNew) return;
     if (this.isConnected && !forceNew) return;
 
+    if (forceNew) {
+      if (this.sock) {
+        try {
+          this.sock.ev?.removeAllListeners?.();
+          this.sock.end?.();
+          this.sock = null;
+        } catch (e) {}
+      }
+      this.clearAuthSession();
+    }
+
     this.isConnecting = true;
+    this.emitStatus();
+
     try {
       const baileys = await getBaileys();
       const makeWASocket = baileys.default?.default || baileys.default || baileys.makeWASocket;
-      const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } = baileys;
+      const {
+        DisconnectReason,
+        useMultiFileAuthState,
+        fetchLatestBaileysVersion,
+        makeCacheableSignalKeyStore,
+        Browsers
+      } = baileys;
 
       if (!fs.existsSync(AUTH_DIR)) {
         fs.mkdirSync(AUTH_DIR, { recursive: true });
       }
 
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-      const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
+      // Guarantee initial creds file exists
+      await saveCreds().catch(() => {});
+
+      const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1043857760] }));
 
       this.sock = makeWASocket({
         version,
         logger: this.logger,
         printQRInTerminal: true,
-        auth: state,
-        browser: ['Repair Management POS', 'Chrome', '1.0.0'],
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, this.logger)
+        },
+        browser: Browsers.windows('Desktop'),
+        syncFullHistory: false,
+        markOnlineOnConnect: true,
+        generateHighQualityLinkPreview: false,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 10000,
-        emitOwnEvents: false,
-        retryRequestDelayMs: 250
+        keepAliveIntervalMs: 15000,
+        retryRequestDelayMs: 250,
+        getMessage: async () => ({ conversation: '' })
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -88,15 +126,19 @@ class BaileysService {
 
         if (qr) {
           try {
-            this.qrCodeDataUrl = await QRCode.toDataURL(qr, { margin: 2, scale: 7 });
+            this.qrCodeDataUrl = await QRCode.toDataURL(qr, { margin: 2, scale: 8 });
             this.isConnected = false;
             this.isConnecting = false;
-            emitEvent('whatsapp:qr', { qr: this.qrCodeDataUrl });
-            emitEvent('whatsapp:status', this.getStatus());
+            this.emitStatus();
             console.log('[Baileys] WhatsApp QR Code generated successfully!');
           } catch (err) {
             console.error('[Baileys] Error generating QR data URL:', err);
           }
+        }
+
+        if (connection === 'connecting') {
+          this.isConnecting = true;
+          this.emitStatus();
         }
 
         if (connection === 'open') {
@@ -107,18 +149,17 @@ class BaileysService {
           console.log('[Baileys] WhatsApp Multi-Device connection established:', this.sock.user);
 
           const phone = this.sock.user?.id ? this.sock.user.id.split(':')[0].split('@')[0] : '';
-          const name = this.sock.user?.name || 'Shop WhatsApp Business';
 
           try {
             await db.query(
-              `UPDATE whatsapp_settings SET is_connected = TRUE, number = COALESCE(NULLIF(number, ''), $1), updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
+              `UPDATE whatsapp_settings SET connected = TRUE, is_connected = TRUE, number = COALESCE(NULLIF(number, ''), $1), updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
               [phone]
             );
           } catch (dbErr) {
             console.error('[Baileys] DB update settings error:', dbErr);
           }
 
-          emitEvent('whatsapp:status', this.getStatus());
+          this.emitStatus();
         }
 
         if (connection === 'close') {
@@ -130,13 +171,15 @@ class BaileysService {
           console.log(`[Baileys] WhatsApp connection closed (Code: ${statusCode}, Reconnect: ${shouldReconnect})`);
 
           try {
-            await db.query(`UPDATE whatsapp_settings SET is_connected = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = 1`);
+            await db.query(`UPDATE whatsapp_settings SET connected = FALSE, is_connected = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = 1`);
           } catch (e) {}
 
-          emitEvent('whatsapp:status', this.getStatus());
+          this.emitStatus();
 
           if (shouldReconnect) {
-            setTimeout(() => this.initWhatsApp(), 3000);
+            // Code 515 (restartRequired) is sent by WhatsApp right after successful QR scan to initiate MD session
+            const delay = statusCode === DisconnectReason.restartRequired ? 1200 : 3000;
+            setTimeout(() => this.initWhatsApp(), delay);
           } else {
             console.log('[Baileys] Session logged out. Cleaning auth files...');
             this.clearAuthSession();
@@ -158,6 +201,7 @@ class BaileysService {
     } catch (error) {
       this.isConnecting = false;
       this.isConnected = false;
+      this.emitStatus();
       console.error('[Baileys] WhatsApp initialization error:', error);
     }
   }
@@ -180,11 +224,14 @@ class BaileysService {
       const { branchStorage } = require('../../middleware/branchContext');
       const branches = await branchManager.listBranches();
 
-      // 1. Check if tracking query (e.g., RPR-1234, BR01-RPR-00001, or REP1234)
+      // 1. Check if tracking query (e.g., RPR-10001, 10001, rpr 10001, or BR01-RPR-00001)
+      const isPureNumber = /^\d{4,6}$/.test(text.trim());
       const trackingMatch = text.match(/(?:(?:BR0?1|BR0?2)[-\s]?)?(?:RPR|REP)[-\s]?(\d+)/i) || 
-                            (text.toUpperCase().includes('RPR-') ? [text] : null);
+                            (text.toUpperCase().includes('RPR') ? [text] : null) ||
+                            (isPureNumber ? [text.trim()] : null);
       if (trackingMatch) {
         const queryTerm = text.trim();
+        const extractedNum = text.replace(/[^0-9]/g, '');
         let matchedJob = null;
         let matchedBranch = null;
         let isPhoneVerified = false;
@@ -195,11 +242,17 @@ class BaileysService {
             const jRes = await pool.query(
               `SELECT * FROM repair_jobs 
                WHERE UPPER(tracking_id) = UPPER($1) 
-                  OR id = $1 
-                  OR UPPER(tracking_id) = UPPER($2) 
-                  OR UPPER(tracking_id) LIKE UPPER($3)
+                  OR UPPER(id) = UPPER($1) 
+                  OR UPPER(tracking_id) = UPPER($2)
+                  OR UPPER(id) = UPPER($2)
+                  OR (LENGTH($3) >= 4 AND (tracking_id LIKE $4 OR id LIKE $4))
                LIMIT 1`,
-              [queryTerm, queryTerm.replace(/^(?:BR0?1|BR0?2)[-\s]?/i, ''), `%${queryTerm}%`]
+              [
+                queryTerm,
+                `RPR-${extractedNum}`,
+                extractedNum,
+                `%${extractedNum}%`
+              ]
             );
 
             if (jRes.rows.length > 0) {
@@ -354,6 +407,39 @@ class BaileysService {
     };
   }
 
+  emitStatus() {
+    const status = this.getStatus();
+    try {
+      const { getIO } = require('../../config/socket');
+      const io = getIO();
+      if (io) {
+        io.emit('whatsapp:status', status);
+        if (status.qr) {
+          io.emit('whatsapp:qr', { qr: status.qr });
+        }
+      }
+    } catch (e) {}
+    emitEvent('whatsapp:status', status);
+  }
+
+  async waitForQrOrStatus(timeoutMs = 9000) {
+    if (this.isConnected) return this.getStatus();
+    if (!this.sock || !this.isConnecting) {
+      await this.initWhatsApp(true);
+    }
+    if (this.qrCodeDataUrl) return this.getStatus();
+
+    return new Promise((resolve) => {
+      const startTime = Date.now();
+      const interval = setInterval(() => {
+        if (this.qrCodeDataUrl || this.isConnected || (Date.now() - startTime > timeoutMs)) {
+          clearInterval(interval);
+          resolve(this.getStatus());
+        }
+      }, 300);
+    });
+  }
+
   clearAuthSession() {
     try {
       if (fs.existsSync(AUTH_DIR)) {
@@ -363,6 +449,7 @@ class BaileysService {
       console.error('[Baileys] Error removing auth directory:', err);
     }
     this.isConnected = false;
+    this.isConnecting = false;
     this.connectedUser = null;
     this.qrCodeDataUrl = null;
   }
@@ -371,12 +458,13 @@ class BaileysService {
     try {
       if (this.sock) {
         await this.sock.logout().catch(() => {});
+        this.sock.ev?.removeAllListeners?.();
         this.sock.end?.();
         this.sock = null;
       }
     } catch (e) {}
     this.clearAuthSession();
-    emitEvent('whatsapp:status', this.getStatus());
+    this.emitStatus();
     return { success: true, message: 'WhatsApp session disconnected & logged out' };
   }
 }

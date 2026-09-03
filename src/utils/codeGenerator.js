@@ -82,38 +82,38 @@ async function getNextInvoiceNo(typeKey, client = db) {
 }
 
 /**
- * Generates next repair tracking ID (e.g. BR01-RPR-00001, BR02-RPR-00001)
+ * Generates next repair tracking ID (e.g. RPR-10001, RPR-10002)
+ * Clean, readable 5-digit format: Branch 1 uses 10000 series, Branch 2 uses 20000 series.
  */
 async function getNextTrackingId(client = db) {
   const branchContext = require('../middleware/branchContext');
   const store = branchContext.getBranchStore();
   const branchId = store?.branchId || 1;
-  const branchCode = branchId === 2 ? 'BR02' : 'BR01';
-  const prefix = `${branchCode}-RPR`;
+  const prefix = 'RPR';
+  const baseOffset = branchId === 2 ? 20000 : 10000;
 
   const res = await client.query(
-    `SELECT tracking_id FROM repair_jobs WHERE tracking_id ILIKE 'RPR-%' OR tracking_id ILIKE $1`,
-    [`${branchCode}-RPR-%`]
+    `SELECT tracking_id FROM repair_jobs WHERE tracking_id ILIKE 'RPR-%' OR tracking_id ILIKE '%-RPR-%'`
   );
 
-  let maxNum = 0;
+  let maxNum = baseOffset;
   for (const row of res.rows) {
     const parts = String(row.tracking_id).split('-');
     const lastPart = parts[parts.length - 1];
     const numPart = parseInt(lastPart, 10);
-    if (!isNaN(numPart) && numPart > maxNum) {
+    if (!isNaN(numPart) && numPart >= baseOffset && numPart < baseOffset + 10000 && numPart > maxNum) {
       maxNum = numPart;
     }
   }
 
   let nextNum = maxNum + 1;
-  let candidate = `${prefix}-${String(nextNum).padStart(5, '0')}`;
+  let candidate = `${prefix}-${nextNum}`;
 
   while (true) {
     const check = await client.query('SELECT 1 FROM repair_jobs WHERE tracking_id = $1', [candidate]);
     if (check.rows.length === 0) break;
     nextNum++;
-    candidate = `${prefix}-${String(nextNum).padStart(5, '0')}`;
+    candidate = `${prefix}-${nextNum}`;
   }
 
   return candidate;
