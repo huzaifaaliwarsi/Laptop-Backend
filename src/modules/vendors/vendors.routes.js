@@ -35,7 +35,7 @@ router.get(
             OR LOWER(v.id) LIKE $${params.length}
         `;
       }
-
+      
       const query = `
         SELECT
           v.id,
