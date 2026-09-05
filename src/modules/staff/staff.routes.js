@@ -341,7 +341,7 @@ router.patch('/:id/status', requireAdmin, async (req, res, next) => {
 });
 
 
-// // DELETE /api/staff/:id - Delete staff (Admin only)
+// DELETE /api/staff/:id - Delete staff (Admin only)
 
 // router.delete('/:id', requireAdmin, async (req, res, next) => {
 //   try {
@@ -357,7 +357,7 @@ router.patch('/:id/status', requireAdmin, async (req, res, next) => {
 //       });
 //     }
 
-//     if (userRes.rows[0].Designation === 'System Administrator') {
+//     if (userRes.rows[0].username === 'Admin') {
 //       return res.status(400).json({
 //         success: false,
 //         code: 'CANNOT_DELETE_ADMIN',
@@ -386,13 +386,6 @@ router.patch('/:id/status', requireAdmin, async (req, res, next) => {
 //   }
 // });
 
-
-
-
-// module.exports = router;
-
-
-// DELETE /api/staff/:id - Delete staff (Admin only)
 
 
 router.delete('/:id', requireAdmin, async (req, res, next) => {
