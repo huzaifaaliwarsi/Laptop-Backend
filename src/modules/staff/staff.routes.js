@@ -340,13 +340,78 @@ router.patch('/:id/status', requireAdmin, async (req, res, next) => {
   }
 });
 
+
+// // DELETE /api/staff/:id - Delete staff (Admin only)
+
+// router.delete('/:id', requireAdmin, async (req, res, next) => {
+//   try {
+//     const { id } = req.params;
+//     const branchId = req.user?.branchId || req.branchId || 1;
+
+//     const userRes = await db.query('SELECT id, username FROM users WHERE id = $1', [id]);
+//     if (userRes.rows.length === 0) {
+//       return res.status(404).json({
+//         success: false,
+//         code: 'NOT_FOUND',
+//         message: 'Staff member not found.'
+//       });
+//     }
+
+//     if (userRes.rows[0].Designation === 'System Administrator') {
+//       return res.status(400).json({
+//         success: false,
+//         code: 'CANNOT_DELETE_ADMIN',
+//         message: 'Primary Branch Administrator cannot be deleted.'
+//       });
+//     }
+
+//     await db.query('DELETE FROM users WHERE id = $1', [id]);
+
+//     // Mark as Deleted in Master Identity Registry while preserving username/phone reservation
+//     await identityRegistry.setIdentityStatus({
+//       branchId,
+//       branchUserId: id,
+//       status: 'Deleted'
+//     });
+
+//     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/staff*');
+//     emitEvent('staff.deleted', { id });
+
+//     return res.json({
+//       success: true,
+//       message: 'Staff user deleted successfully'
+//     });
+//   } catch (error) {
+//     next(error);
+//   }
+// });
+
+
+
+
+// module.exports = router;
+
+
 // DELETE /api/staff/:id - Delete staff (Admin only)
+
+
 router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const branchId = req.user?.branchId || req.branchId || 1;
+    const loggedInUserId = req.user?.id; // Current session user ID
 
-    const userRes = await db.query('SELECT id, username FROM users WHERE id = $1', [id]);
+    // 🛑 FIX 1: Prevent self-deletion directly via session state context
+    if (String(id).trim() === String(loggedInUserId).trim()) {
+      return res.status(400).json({
+        success: false,
+        code: 'SELF_DELETION_PROHIBITED',
+        message: 'admin can not be deleted!'
+      });
+    }
+
+    // 🛑 FIX 2: Added designation to select layout (PostgreSQL returns lowercase)
+    const userRes = await db.query('SELECT id, username, designation FROM users WHERE id = $1', [id]);
     if (userRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -355,7 +420,9 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
       });
     }
 
-    if (userRes.rows[0].username === 'admin') {
+    // 🛑 FIX 3: Safe lower-case mapping object evaluation
+    const targetUser = userRes.rows[0];
+    if (targetUser.designation === 'System Administrator') {
       return res.status(400).json({
         success: false,
         code: 'CANNOT_DELETE_ADMIN',
@@ -363,6 +430,7 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
       });
     }
 
+    // Hard purge execution block 
     await db.query('DELETE FROM users WHERE id = $1', [id]);
 
     // Mark as Deleted in Master Identity Registry while preserving username/phone reservation
@@ -384,4 +452,5 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
   }
 });
 
-module.exports = router;
+
+module.exports = router
