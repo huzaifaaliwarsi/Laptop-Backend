@@ -466,13 +466,14 @@ router.post('/messages/send', async (req, res, next) => {
     // Send via live WhatsApp if connected
     if (convRes.rows.length > 0 && convRes.rows[0].contact) {
       const contactPhone = convRes.rows[0].contact;
+      const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
       try {
-        if (baileys.isConnected) {
-          await baileys.sendTextMessage(contactPhone, text.trim());
-          console.log(`[Baileys] Agent message successfully dispatched to ${contactPhone}`);
+        if (baileys.isBranchConnected(branchId)) {
+          await baileys.sendTextMessage(branchId, contactPhone, text.trim());
+          console.log(`[Baileys Branch ${branchId}] Agent message successfully dispatched to ${contactPhone}`);
         }
       } catch (waErr) {
-        console.error('[Baileys] Error dispatching agent message to WhatsApp:', waErr.message);
+        console.error(`[Baileys Branch ${branchId}] Error dispatching agent message to WhatsApp:`, waErr.message);
       }
     }
 
@@ -578,7 +579,8 @@ const baileys = require('./baileys.service');
 
 // GET /api/whatsapp/status - Live multi-device connection status & QR code
 router.get('/status', (req, res) => {
-  const status = baileys.getStatus();
+  const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
+  const status = baileys.getStatus(branchId);
   return res.json({
     success: true,
     data: status
@@ -588,7 +590,8 @@ router.get('/status', (req, res) => {
 // POST /api/whatsapp/connect - Force generate QR code & start connection
 router.post('/connect', async (req, res, next) => {
   try {
-    const status = await baileys.waitForQrOrStatus(9000);
+    const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
+    const status = await baileys.waitForQrOrStatus(branchId, 15000);
     return res.json({
       success: true,
       message: status.qr
@@ -604,10 +607,11 @@ router.post('/connect', async (req, res, next) => {
 // POST /api/whatsapp/disconnect - Disconnect & logout
 router.post('/disconnect', async (req, res, next) => {
   try {
-    const result = await baileys.disconnect();
+    const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
+    const result = await baileys.disconnect(branchId);
     return res.json({
       success: true,
-      message: 'WhatsApp session disconnected & logged out',
+      message: `WhatsApp session for Branch ${branchId} disconnected & logged out`,
       data: result
     });
   } catch (err) {
@@ -618,11 +622,12 @@ router.post('/disconnect', async (req, res, next) => {
 // POST /api/whatsapp/send-test - Send test message
 router.post('/send-test', async (req, res, next) => {
   try {
+    const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
     const { phone, message } = req.body;
     if (!phone || !message) {
       return res.status(400).json({ success: false, message: 'Phone number and message text are required.' });
     }
-    await baileys.sendTextMessage(phone, message);
+    await baileys.sendTextMessage(branchId, phone, message);
     return res.json({
       success: true,
       message: `Test WhatsApp message successfully sent to ${phone}!`

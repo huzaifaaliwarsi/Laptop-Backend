@@ -10,9 +10,9 @@ const server = http.createServer(app);
 // Initialize Socket.IO
 initSocket(server, process.env.CORS_ORIGIN || 'http://localhost:3000');
 
-// Initialize Baileys WhatsApp Multi-Device connection
+// Initialize Baileys WhatsApp Multi-Device connection (only if active session already exists)
 const baileysService = require('./modules/whatsapp/baileys.service');
-baileysService.initWhatsApp().catch(err => console.error('[Baileys] WhatsApp initialization error:', err));
+baileysService.initWhatsAppIfSessionExists().catch(err => console.error('[Baileys] WhatsApp initialization error:', err));
 
 server.listen(PORT, () => {
   console.log(`[Express API Server] Running on http://localhost:${PORT}`);

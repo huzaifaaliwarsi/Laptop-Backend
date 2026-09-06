@@ -54,14 +54,14 @@ router.post('/login', async (req, res, next) => {
             branchId: primaryBranch.id || 1
           },
           process.env.JWT_SECRET || 'retail_repair_jwt_super_secure_secret_key_2026',
-          { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+          { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
         );
 
         res.cookie('token', token, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
-          maxAge: 7 * 24 * 60 * 60 * 1000
+          maxAge: 30 * 24 * 60 * 60 * 1000
         });
 
         return res.json({
@@ -165,14 +165,14 @@ router.post('/login', async (req, res, next) => {
     const token = jwt.sign(
       { id: matchedUser.id, username: matchedUser.username, role: matchedUser.role, branchId },
       process.env.JWT_SECRET || 'retail_repair_jwt_super_secure_secret_key_2026',
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+      { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
     );
 
     res.cookie('token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000
+      maxAge: 30 * 24 * 60 * 60 * 1000
     });
 
     return res.json({

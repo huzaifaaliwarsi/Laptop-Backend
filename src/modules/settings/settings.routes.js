@@ -7,8 +7,13 @@ const { emitEvent } = require('../../config/socket');
 const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
 // GET /api/settings/company - Public or any authenticated user (Cached 300s — called on every invoice print)
-router.get('/company', cacheRoute(300), async (req, res, next) => {
+router.get('/company', (req, res, next) => {
+  res.setHeader('Cache-Control', 'public, max-age=600, stale-while-revalidate=86400');
+  res.setHeader('Vary', 'X-Branch-Id');
+  next();
+}, cacheRoute(300), async (req, res, next) => {
   try {
+
     const result = await db.query(`
       SELECT id, company_name, tagline, invoice_subtitle, phone, email, tax_number, address, invoice_footer, logo_data, ntn, strn, pos_id, fbr_pos_id, updated_at
       FROM business_settings

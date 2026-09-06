@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const branchManager = require('../../config/branchManager');
+const identityRegistry = require('../../services/identityRegistry');
 const { getAvailableBalance } = require('../../utils/financialFormulas');
 const { CacheService, cacheRoute } = require('../../config/cache');
 
@@ -296,14 +297,14 @@ router.post('/login', async (req, res, next) => {
         isSuperAdmin: true
       },
       process.env.JWT_SECRET || 'retail_repair_jwt_super_secure_secret_key_2026',
-      { expiresIn: '7d' }
+      { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
     );
 
     res.cookie('token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000
+      maxAge: 30 * 24 * 60 * 60 * 1000
     });
 
     return res.json({
@@ -764,8 +765,8 @@ router.post('/branches/:id/admin/reset-password', requireSuperAdmin, async (req,
   }
 });
 
-// GET /api/super-admin/audit-logs — Paginated master audit logs (Cached 30s)
-router.get('/audit-logs', requireSuperAdmin, cacheRoute(30), async (req, res, next) => {
+// GET /api/super-admin/audit-logs — Paginated master audit logs (Real-time live query)
+router.get('/audit-logs', requireSuperAdmin, async (req, res, next) => {
   try {
     const limit = parseInt(req.query.limit || '50', 10);
     const offset = parseInt(req.query.offset || '0', 10);
@@ -821,8 +822,8 @@ router.delete('/audit-logs', requireSuperAdmin, async (req, res, next) => {
   }
 });
 
-// GET /api/super-admin/branch-admins — List branch admins across all registered branches (Cached 60s)
-router.get('/branch-admins', requireSuperAdmin, cacheRoute(60), async (req, res, next) => {
+// GET /api/super-admin/branch-admins — List branch admins across all registered branches (Real-time live query)
+router.get('/branch-admins', requireSuperAdmin, async (req, res, next) => {
   try {
     const branches = await branchManager.listBranches();
     const branchAdmins = [];
@@ -918,6 +919,207 @@ router.post('/branches/:id/reset-admin-password', requireSuperAdmin, async (req,
     next(error);
   }
 });
+
+// POST & DELETE /api/super-admin/branches/:branchId/admins/:adminId/delete — Super Admin permanently deletes a branch admin
+async function handleDeleteBranchAdmin(req, res, next) {
+  try {
+    const { branchId, adminId } = req.params;
+    const bId = parseInt(branchId, 10);
+    const { superAdminPassword } = req.body;
+
+    if (!superAdminPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Super Admin password is required to authorize administrator deletion.'
+      });
+    }
+
+    // 1. Verify Super Admin password against master database
+    const saRes = await branchManager.masterPool.query(
+      `SELECT id, password_hash FROM master_super_admins WHERE id = $1 LIMIT 1`,
+      [req.user.id]
+    );
+    if (saRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Super Admin account not found.' });
+    }
+
+    const isMatch = await bcrypt.compare(superAdminPassword, saRes.rows[0].password_hash);
+    if (!isMatch) {
+      return res.status(400).json({
+        success: false,
+        message: 'Incorrect Super Admin password. Administrator deletion rejected.'
+      });
+    }
+
+    // 2. Verify target branch exists in master registry
+    const bRes = await branchManager.masterPool.query('SELECT * FROM master_branches WHERE id = $1', [bId]);
+    if (bRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Branch not found.' });
+    }
+    const branch = bRes.rows[0];
+
+    // 3. Connect to branch pool and find target admin user
+    const pool = await branchManager.getBranchPool(bId, true);
+    const userRes = await pool.query(
+      `SELECT id, name, username, role, contact FROM users WHERE id = $1 OR LOWER(username) = LOWER($1)`,
+      [adminId]
+    );
+
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `User "${adminId}" not found in Branch ${branch.branch_code}.`
+      });
+    }
+
+    const adminUser = userRes.rows[0];
+    if (adminUser.role !== 'admin') {
+      return res.status(400).json({
+        success: false,
+        message: `User "${adminUser.username}" is not an administrator (Role: ${adminUser.role}).`
+      });
+    }
+
+    // 4. Delete user from branch physical database
+    await pool.query('DELETE FROM users WHERE id = $1', [adminUser.id]);
+
+    // 5. Release staff username and phone from Master Identity Registry
+    await branchManager.masterPool.query(
+      `DELETE FROM master_staff_identities 
+       WHERE branch_id = $1 AND (branch_user_id = $2 OR LOWER(normalized_username) = LOWER($3))`,
+      [bId, adminUser.id, adminUser.username]
+    );
+
+    // 6. Update master_branches if this user was recorded as primary admin
+    await branchManager.masterPool.query(
+      `UPDATE master_branches 
+       SET admin_name = NULL, admin_username = NULL 
+       WHERE id = $1 AND LOWER(admin_username) = LOWER($2)`,
+      [bId, adminUser.username]
+    );
+
+    // 7. Write immutable Master Audit Log
+    await branchManager.masterPool.query(`
+      INSERT INTO master_audit_logs (branch_id, action, details, performed_by)
+      VALUES ($1, 'BRANCH_ADMIN_DELETED', $2::jsonb, $3)
+    `, [
+      bId,
+      JSON.stringify({
+        branchCode: branch.branch_code,
+        branchName: branch.branch_name,
+        adminId: adminUser.id,
+        adminName: adminUser.name,
+        adminUsername: adminUser.username,
+        deletedAt: new Date().toISOString()
+      }),
+      req.user.username || 'superadmin'
+    ]);
+
+    await CacheService.invalidatePattern('route:*:/api/super-admin*');
+    await CacheService.invalidateBranchPattern(bId, '/api/staff*');
+
+    return res.json({
+      success: true,
+      message: `Administrator "${adminUser.name}" (${adminUser.username}) of Branch ${branch.branch_code} has been permanently deleted.`
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+router.post('/branches/:branchId/admins/:adminId/delete', requireSuperAdmin, handleDeleteBranchAdmin);
+router.delete('/branches/:branchId/admins/:adminId', requireSuperAdmin, handleDeleteBranchAdmin);
+
+// PATCH & POST /api/super-admin/branches/:branchId/admins/:adminId/status — Super Admin toggles or sets admin status
+async function handleToggleBranchAdminStatus(req, res, next) {
+  try {
+    const { branchId, adminId } = req.params;
+    const { status } = req.body; // Optional explicit status: 'Active' | 'Inactive'
+
+    const branch = await branchManager.getBranchById(branchId);
+    if (!branch) {
+      return res.status(404).json({
+        success: false,
+        code: 'BRANCH_NOT_FOUND',
+        message: 'Branch not found.'
+      });
+    }
+
+    const pool = await branchManager.getBranchPool(branchId, true);
+    const userRes = await pool.query(
+      `SELECT id, name, username, status, role FROM users WHERE id = $1 LIMIT 1`,
+      [adminId]
+    );
+
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        code: 'ADMIN_NOT_FOUND',
+        message: 'Administrator account not found in branch database.'
+      });
+    }
+
+    const adminUser = userRes.rows[0];
+    const newStatus = status ? status : (adminUser.status === 'Active' ? 'Inactive' : 'Active');
+
+    // 1. Update in physical branch database
+    await pool.query(
+      `UPDATE users SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [newStatus, adminId]
+    );
+
+    // 2. Sync with Master Identity Registry
+    try {
+      await identityRegistry.setIdentityStatus({
+        branchId,
+        branchUserId: adminId,
+        status: newStatus
+      });
+    } catch (regErr) {
+      console.warn(`[SUPER_ADMIN] Identity status sync note: ${regErr.message}`);
+    }
+
+    // 3. Invalidate caches
+    await CacheService.invalidateBranchPattern(branchId, '/api/staff*');
+    await CacheService.invalidatePattern('*branch-admins*');
+    await CacheService.invalidatePattern('*audit-logs*');
+
+    // 4. Record high-security audit log
+    await branchManager.masterPool.query(
+      `INSERT INTO master_audit_logs (branch_id, action, details, performed_by)
+       VALUES ($1, $2, $3::jsonb, $4)`,
+      [
+        branchId,
+        'BRANCH_ADMIN_STATUS_CHANGED',
+        JSON.stringify({
+          adminId,
+          adminName: adminUser.name,
+          adminUsername: adminUser.username,
+          previousStatus: adminUser.status,
+          newStatus: newStatus,
+          branchCode: branch.branch_code,
+          branchName: branch.branch_name
+        }),
+        req.user?.username || 'superadmin'
+      ]
+    );
+
+    return res.json({
+      success: true,
+      message: `Administrator "${adminUser.name}" (${adminUser.username}) is now ${newStatus}.`,
+      data: {
+        adminId,
+        username: adminUser.username,
+        status: newStatus
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+router.patch('/branches/:branchId/admins/:adminId/status', requireSuperAdmin, handleToggleBranchAdminStatus);
+router.post('/branches/:branchId/admins/:adminId/status', requireSuperAdmin, handleToggleBranchAdminStatus);
 
 // PUT /api/super-admin/security/password — Update Platform Super Admin master password
 router.put('/security/password', requireSuperAdmin, async (req, res, next) => {
@@ -1097,14 +1299,19 @@ router.post('/branches/:id/delete', requireSuperAdmin, async (req, res, next) =>
 
     // 6. Permanent Delete action: Disconnect pool & delete registration
     try {
-      if (branchManager.branchPools.has(branchId)) {
-        const pool = branchManager.branchPools.get(branchId);
-        await pool.end();
-        branchManager.branchPools.delete(branchId);
-      }
+      await branchManager.closeBranchPool(branchId);
     } catch (poolErr) {
       console.warn(`[Branch Deletion] Pool teardown notice:`, poolErr.message);
     }
+
+    // Clean up WhatsApp auth session for this branch
+    try {
+      const baileys = require('../whatsapp/baileys.service');
+      baileys.clearAuthSession(branchId);
+    } catch (waErr) {}
+
+    // Release staff usernames/phones from Master Identity Registry
+    await branchManager.masterPool.query('DELETE FROM master_staff_identities WHERE branch_id = $1', [branchId]);
 
     // Remove from master_branches
     await branchManager.masterPool.query('DELETE FROM master_branches WHERE id = $1', [branchId]);

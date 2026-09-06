@@ -12,6 +12,7 @@ npm-debug.log*
 
 # Auth & Sessions
 whatsapp_auth_session/
+.whatsapp_session/
 scratch/
 
 # Editor & OS

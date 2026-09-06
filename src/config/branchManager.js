@@ -805,10 +805,25 @@ async function updateBranch(branchId, updates) {
   return res.rows[0] || null;
 }
 
+/**
+ * Close and evict an active connection pool for a branch
+ */
+async function closeBranchPool(branchId) {
+  const bId = parseInt(branchId, 10);
+  if (branchPools.has(bId)) {
+    const pool = branchPools.get(bId);
+    branchPools.delete(bId);
+    try {
+      await pool.end();
+    } catch (e) {}
+  }
+}
+
 module.exports = {
   masterPool,
   initMasterDb,
   getBranchPool,
+  closeBranchPool,
   executeFullMigrationPipeline,
   provisionBranch2Database,
   listBranches,

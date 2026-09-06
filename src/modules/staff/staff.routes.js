@@ -198,12 +198,30 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const { name, contact, phone, designation, role, username, password, status } = req.body;
 
-    const existing = await db.query('SELECT id, role, username, contact, status FROM users WHERE id = $1', [id]);
+    const existing = await db.query('SELECT id, role, username, contact, status, designation FROM users WHERE id = $1', [id]);
     if (existing.rows.length === 0) {
       return res.status(404).json({
         success: false,
         code: 'NOT_FOUND',
         message: 'Staff member not found.'
+      });
+    }
+
+    // 🛑 Prevent self-deactivation or modifying admin status from staff portal
+    const isSelf = String(id).trim() === String(req.user?.id).trim();
+    if (isSelf && status && String(status).toLowerCase() === 'inactive') {
+      return res.status(400).json({
+        success: false,
+        code: 'CANNOT_DEACTIVATE_SELF',
+        message: 'You cannot deactivate your own account.'
+      });
+    }
+
+    if ((existing.rows[0].role === 'admin' || existing.rows[0].designation === 'System Administrator' || existing.rows[0].username?.toLowerCase() === 'admin') && status && String(status).toLowerCase() === 'inactive') {
+      return res.status(400).json({
+        success: false,
+        code: 'CANNOT_DEACTIVATE_ADMIN',
+        message: 'Branch Administrator accounts can only be deactivated by Platform Super Admin.'
       });
     }
 
@@ -296,8 +314,18 @@ router.patch('/:id/status', requireAdmin, async (req, res, next) => {
     const { id } = req.params;
     const { status } = req.body;
     const branchId = req.user?.branchId || req.branchId || 1;
+    const loggedInUserId = req.user?.id;
 
-    const userRes = await db.query('SELECT id, username FROM users WHERE id = $1', [id]);
+    // 🛑 Prevent self-deactivation
+    if (String(id).trim() === String(loggedInUserId).trim()) {
+      return res.status(400).json({
+        success: false,
+        code: 'CANNOT_DEACTIVATE_SELF',
+        message: 'You cannot deactivate your own account.'
+      });
+    }
+
+    const userRes = await db.query('SELECT id, username, designation, role FROM users WHERE id = $1', [id]);
     if (userRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -306,11 +334,12 @@ router.patch('/:id/status', requireAdmin, async (req, res, next) => {
       });
     }
 
-    if (userRes.rows[0].username === 'admin') {
+    const targetUser = userRes.rows[0];
+    if (targetUser.role === 'admin' || targetUser.designation === 'System Administrator' || String(targetUser.username).toLowerCase() === 'admin') {
       return res.status(400).json({
         success: false,
         code: 'CANNOT_DEACTIVATE_ADMIN',
-        message: 'Primary Branch Administrator cannot be deactivated.'
+        message: 'Branch Administrator accounts can only be activated or deactivated by Platform Super Admin.'
       });
     }
 
@@ -340,71 +369,22 @@ router.patch('/:id/status', requireAdmin, async (req, res, next) => {
   }
 });
 
-
-// DELETE /api/staff/:id - Delete staff (Admin only)
-
-// router.delete('/:id', requireAdmin, async (req, res, next) => {
-//   try {
-//     const { id } = req.params;
-//     const branchId = req.user?.branchId || req.branchId || 1;
-
-//     const userRes = await db.query('SELECT id, username FROM users WHERE id = $1', [id]);
-//     if (userRes.rows.length === 0) {
-//       return res.status(404).json({
-//         success: false,
-//         code: 'NOT_FOUND',
-//         message: 'Staff member not found.'
-//       });
-//     }
-
-//     if (userRes.rows[0].username === 'Admin') {
-//       return res.status(400).json({
-//         success: false,
-//         code: 'CANNOT_DELETE_ADMIN',
-//         message: 'Primary Branch Administrator cannot be deleted.'
-//       });
-//     }
-
-//     await db.query('DELETE FROM users WHERE id = $1', [id]);
-
-//     // Mark as Deleted in Master Identity Registry while preserving username/phone reservation
-//     await identityRegistry.setIdentityStatus({
-//       branchId,
-//       branchUserId: id,
-//       status: 'Deleted'
-//     });
-
-//     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/staff*');
-//     emitEvent('staff.deleted', { id });
-
-//     return res.json({
-//       success: true,
-//       message: 'Staff user deleted successfully'
-//     });
-//   } catch (error) {
-//     next(error);
-//   }
-// });
-
-
-
 router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const branchId = req.user?.branchId || req.branchId || 1;
     const loggedInUserId = req.user?.id; // Current session user ID
 
-    // 🛑 FIX 1: Prevent self-deletion directly via session state context
+    // 🛑 Prevent self-deletion directly via session state context
     if (String(id).trim() === String(loggedInUserId).trim()) {
       return res.status(400).json({
         success: false,
         code: 'SELF_DELETION_PROHIBITED',
-        message: 'admin can not be deleted!'
+        message: 'You cannot delete your own account.'
       });
     }
 
-    // 🛑 FIX 2: Added designation to select layout (PostgreSQL returns lowercase)
-    const userRes = await db.query('SELECT id, username, designation FROM users WHERE id = $1', [id]);
+    const userRes = await db.query('SELECT id, username, designation, role FROM users WHERE id = $1', [id]);
     if (userRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -413,13 +393,12 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
       });
     }
 
-    // 🛑 FIX 3: Safe lower-case mapping object evaluation
     const targetUser = userRes.rows[0];
-    if (targetUser.designation === 'System Administrator') {
+    if (targetUser.designation === 'System Administrator' || targetUser.role === 'admin' || String(targetUser.username).toLowerCase() === 'admin') {
       return res.status(400).json({
         success: false,
         code: 'CANNOT_DELETE_ADMIN',
-        message: 'Primary Branch Administrator cannot be deleted.'
+        message: 'Branch Administrator accounts cannot be deleted from staff portal. Only Super Admin has authority to delete administrators.'
       });
     }
 
