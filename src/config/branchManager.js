@@ -43,8 +43,10 @@ const masterPoolConfig = process.env.MASTER_DATABASE_URL || process.env.DATABASE
       connectionString: process.env.MASTER_DATABASE_URL || process.env.DATABASE_URL,
       ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
       max: 10,
-      idleTimeoutMillis: 30000,
+      idleTimeoutMillis: 120000,
       connectionTimeoutMillis: 10000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
     }
   : {
       host: process.env.DB_HOST || '127.0.0.1',

@@ -141,12 +141,15 @@ function cacheRoute(ttlSeconds = 60, customKeyFn = null) {
     const role = req.user?.role || 'anon';
     const userId = req.user?.id || 'anon';
 
+    const isBustCache = Boolean(req.query._t || req.query.nocache === 'true' || req.headers['cache-control'] === 'no-cache');
+
     // Strip dynamic cache-busting params (_t, _, timestamp, t) so queries hit cache smoothly
     const cleanQuery = { ...(req.query || {}) };
     delete cleanQuery._t;
     delete cleanQuery._;
     delete cleanQuery.timestamp;
     delete cleanQuery.t;
+    delete cleanQuery.nocache;
 
     const fullPath = `${req.baseUrl || ''}${req.path || ''}`;
 
@@ -159,10 +162,12 @@ function cacheRoute(ttlSeconds = 60, customKeyFn = null) {
       ? customKeyFn(req)
       : `route:${branchScope}:${fullPath}:${JSON.stringify(cleanQuery)}:${role}${userScope}`;
 
-    const cached = memoryStore.get(key);
-    if (cached) {
-      res.setHeader('X-Cache-Status', 'HIT');
-      return res.json(cached);
+    if (!isBustCache) {
+      const cached = memoryStore.get(key);
+      if (cached) {
+        res.setHeader('X-Cache-Status', 'HIT');
+        return res.json(cached);
+      }
     }
 
     // Intercept res.json to populate cache

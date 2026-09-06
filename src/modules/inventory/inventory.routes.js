@@ -85,6 +85,64 @@ router.get('/:id/history', cacheRoute(60), async (req, res, next) => {
   }
 });
 
+// GET /api/products/export-csv - Export full inventory as formatted CSV
+router.get('/export-csv', requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const products = await InventoryService.getProducts({}, req.user.role);
+
+    const headers = [
+      'Product Code',
+      'Category',
+      'Brand',
+      'Model',
+      'Specifications',
+      'Condition',
+      'Current Stock',
+      ...(req.user.role !== 'technician' ? ['Cost Price'] : []),
+      'Expected Sale Price',
+      'Low Stock Alert',
+      'Source / Supplier'
+    ];
+
+    function escapeCsvCell(val) {
+      if (val === null || val === undefined) return '';
+      let str = String(val);
+      if (str.includes('"') || str.includes(',') || str.includes('\n') || str.includes('\r')) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    }
+
+    const rows = [headers.map(escapeCsvCell).join(',')];
+
+    for (const p of products) {
+      const row = [
+        p.code,
+        p.category,
+        p.brand,
+        p.model,
+        p.specifications || '',
+        p.condition || 'Used',
+        p.currentStock || 0,
+        ...(req.user.role !== 'technician' ? [p.costPrice || 0] : []),
+        p.expectedSalePrice || 0,
+        p.lowStockAlert || 1,
+        p.sourceName || ''
+      ];
+      rows.push(row.map(escapeCsvCell).join(','));
+    }
+
+    const csvContent = '\uFEFF' + rows.join('\r\n');
+    const dateStr = new Date().toISOString().slice(0, 10);
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="inventory-export-${dateStr}.csv"`);
+    return res.send(csvContent);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/products/:id - Product detail + movements (Cached 60s)
 router.get('/:id', cacheRoute(60), async (req, res, next) => {
   try {
@@ -784,21 +842,115 @@ router.post('/adjustments', requireAdmin, async (req, res, next) => {
   }
 });
 
-// POST /api/products/bulk-csv - Bulk CSV import
+function parseCsvText(text) {
+  if (!text || typeof text !== 'string') return [];
+  const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
+  if (lines.length < 2) return [];
+
+  function splitCsvLine(line) {
+    const result = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (c === ',' && !inQuotes) {
+        result.push(cur.trim());
+        cur = '';
+      } else {
+        cur += c;
+      }
+    }
+    result.push(cur.trim());
+    return result;
+  }
+
+  const rawHeaders = splitCsvLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const headerMap = {
+    category: ['category', 'categoryname', 'cat'],
+    brand: ['brand', 'make'],
+    model: ['model', 'modelname', 'productname'],
+    specifications: ['specifications', 'specs', 'specification', 'details', 'description'],
+    condition: ['condition', 'state'],
+    quantity: ['quantity', 'qty', 'stock', 'initialstock', 'count'],
+    costPrice: ['costprice', 'cost', 'purchaseprice', 'buyprice'],
+    expectedSalePrice: ['expectedsaleprice', 'saleprice', 'price', 'sellprice', 'sellingprice'],
+    lowStockAlert: ['lowstockalert', 'lowstock', 'alert', 'minstock']
+  };
+
+  const resolvedIndices = {};
+  for (const [field, aliases] of Object.entries(headerMap)) {
+    const idx = rawHeaders.findIndex(h => aliases.includes(h));
+    if (idx !== -1) resolvedIndices[field] = idx;
+  }
+
+  const products = [];
+  for (let i = 1; i < lines.length; i++) {
+    const values = splitCsvLine(lines[i]);
+    if (values.length === 0 || values.every(v => v === '')) continue;
+
+    const row = {};
+    for (const [field, idx] of Object.entries(resolvedIndices)) {
+      row[field] = values[idx] !== undefined ? values[idx] : '';
+    }
+
+    if (!row.category && values[0]) row.category = values[0];
+    if (!row.brand && values[1]) row.brand = values[1];
+    if (!row.model && values[2]) row.model = values[2];
+    if (!row.specifications && values[3]) row.specifications = values[3];
+    if (!row.condition && values[4]) row.condition = values[4] || 'Used';
+    if (!row.quantity && values[5]) row.quantity = values[5];
+    if (!row.costPrice && values[6]) row.costPrice = values[6];
+    if (!row.expectedSalePrice && values[7]) row.expectedSalePrice = values[7];
+    if (!row.lowStockAlert && values[8]) row.lowStockAlert = values[8];
+
+    const qty = parseInt(row.quantity, 10);
+    if (row.category && row.brand && row.model && !isNaN(qty) && qty > 0) {
+      products.push({
+        category: row.category,
+        brand: row.brand,
+        model: row.model,
+        specifications: row.specifications || '',
+        condition: row.condition || 'Used',
+        quantity: qty,
+        costPrice: parseFloat(row.costPrice) || 0,
+        expectedSalePrice: parseFloat(row.expectedSalePrice) || 0,
+        lowStockAlert: parseInt(row.lowStockAlert, 10) || 1
+      });
+    }
+  }
+  return products;
+}
+
+
+
+// POST /api/products/bulk-csv - Bulk CSV import with smart auto-parsing
 router.post('/bulk-csv', requireAdmin, async (req, res, next) => {
   try {
-    const { products } = req.body;
-    if (!Array.isArray(products) || products.length === 0) {
+    let productList = req.body.products;
+    if (!Array.isArray(productList) || productList.length === 0) {
+      if (req.body.csvText && typeof req.body.csvText === 'string') {
+        productList = parseCsvText(req.body.csvText);
+      }
+    }
+
+    if (!Array.isArray(productList) || productList.length === 0) {
       return res.status(400).json({
         success: false,
         code: 'EMPTY_LIST',
-        message: 'No product rows provided in CSV.'
+        message: 'No valid product rows could be extracted from CSV. Please check headers and formatting.'
       });
     }
 
     const imported = [];
     await db.withTransaction(async (client) => {
-      for (const p of products) {
+      for (const p of productList) {
         if (p.category && p.brand && p.model && p.quantity > 0) {
           const sourceData = {
             sourceName: p.sourceName || 'CSV Bulk Import',
@@ -808,20 +960,22 @@ router.post('/bulk-csv', requireAdmin, async (req, res, next) => {
             refType: 'CSV Import',
             refId: `CSV-${Date.now()}`
           };
-          const res = await InventoryService.addOrMergeProduct(p, sourceData, req.user, client);
-          imported.push(res.product);
+          const result = await InventoryService.addOrMergeProduct(p, sourceData, req.user, client);
+          imported.push(result.product);
         }
       }
     });
 
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
+    await CacheService.invalidateBranchPatterns(getBranchIdFromReq(req), [
+      '/api/products*',
+      '/api/categories*',
+      '/api/dashboard*'
+    ]);
 
     return res.json({
       success: true,
-      message: `${imported.length} product row(s) imported successfully`,
-      data: { count: imported.length }
+      message: `${imported.length} product row(s) imported and merged successfully!`,
+      data: { count: imported.length, imported: imported.length }
     });
   } catch (error) {
     next(error);
