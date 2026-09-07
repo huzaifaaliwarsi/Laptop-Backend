@@ -301,6 +301,18 @@ class InvoiceService {
         items: processedItems
       };
     });
+
+    // Auto-dispatch invoice via WhatsApp (PDF)
+    try {
+      const InvoiceWhatsAppService = require('./invoice-whatsapp.service');
+      InvoiceWhatsAppService.sendInvoiceWhatsApp(result.invoice.id).catch(e => {
+        console.error('[createSale] WhatsApp invoice auto-send error:', e.message);
+      });
+    } catch (waErr) {
+      console.error('[createSale] WhatsApp invoice trigger error:', waErr.message);
+    }
+
+    return result;
   }
 
   /**
@@ -446,6 +458,18 @@ class InvoiceService {
         products: processedItems
       };
     });
+
+    // Auto-dispatch vendor invoice / bill via WhatsApp (PDF)
+    try {
+      const InvoiceWhatsAppService = require('./invoice-whatsapp.service');
+      InvoiceWhatsAppService.sendInvoiceWhatsApp(result.invoice.id).catch(e => {
+        console.error('[createVendorPurchase] WhatsApp invoice auto-send error:', e.message);
+      });
+    } catch (waErr) {
+      console.error('[createVendorPurchase] WhatsApp invoice trigger error:', waErr.message);
+    }
+
+    return result;
   }
 
   /**
@@ -589,6 +613,18 @@ class InvoiceService {
         products: processedItems
       };
     });
+
+    // Auto-dispatch customer purchase invoice via WhatsApp (PDF)
+    try {
+      const InvoiceWhatsAppService = require('./invoice-whatsapp.service');
+      InvoiceWhatsAppService.sendInvoiceWhatsApp(result.invoice.id).catch(e => {
+        console.error('[createCustomerPurchase] WhatsApp invoice auto-send error:', e.message);
+      });
+    } catch (waErr) {
+      console.error('[createCustomerPurchase] WhatsApp invoice trigger error:', waErr.message);
+    }
+
+    return result;
   }
 
   /**
@@ -787,6 +823,18 @@ class InvoiceService {
         receivedProduct: recResult.product
       };
     });
+
+    // Auto-dispatch product exchange invoice via WhatsApp (PDF)
+    try {
+      const InvoiceWhatsAppService = require('./invoice-whatsapp.service');
+      InvoiceWhatsAppService.sendInvoiceWhatsApp(result.invoice.id).catch(e => {
+        console.error('[createExchange] WhatsApp invoice auto-send error:', e.message);
+      });
+    } catch (waErr) {
+      console.error('[createExchange] WhatsApp invoice trigger error:', waErr.message);
+    }
+
+    return result;
   }
 
   /**

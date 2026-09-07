@@ -8,6 +8,29 @@ const { getNextEntityId } = require('../../utils/codeGenerator');
 const { getCreator } = require('../../utils/userHelper');
 const { emitEvent } = require('../../config/socket');
 const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
+// GET /api/invoices/:id/pdf - Stream official PDF invoice document (Direct access for PDF preview & download)
+router.get('/:id/pdf', async (req, res, next) => {
+  try {
+    const invoice = await InvoiceService.getInvoiceById(req.params.id);
+    if (!invoice) {
+      return res.status(404).json({
+        success: false,
+        message: 'Invoice not found.'
+      });
+    }
+
+    const { generateInvoicePdf } = require('./invoice-pdf.service');
+    const pdfBuffer = await generateInvoicePdf(invoice);
+    const filename = `Invoice-${invoice.invoiceNo || invoice.id}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    return res.end(pdfBuffer);
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.use(authenticateToken);
 
@@ -349,6 +372,37 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
       success: true,
       message: 'Sales invoice voided and inventory restored successfully',
       data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/invoices/:id/send-whatsapp - Send official PDF invoice to customer/vendor WhatsApp
+router.post('/:id/send-whatsapp', async (req, res, next) => {
+  try {
+    const InvoiceWhatsAppService = require('./invoice-whatsapp.service');
+    const branchId = getBranchIdFromReq(req);
+    const result = await InvoiceWhatsAppService.sendInvoiceWhatsApp(req.params.id, {
+      branchId,
+      isManual: true,
+      customNote: req.body?.customNote
+    });
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: result.message || result.error || 'Failed to dispatch WhatsApp invoice',
+        reason: result.reason
+      });
+    }
+
+    return res.json({
+      success: true,
+      delivered: result.delivered,
+      wa_not_connected: result.wa_not_connected || false,
+      contact: result.contact,
+      message: result.message || 'Invoice PDF sent via WhatsApp'
     });
   } catch (error) {
     next(error);

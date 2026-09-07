@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const db = require('../../config/db');
 const { emitEvent } = require('../../config/socket');
+const { getNextEntityId } = require('../../utils/codeGenerator');
 
 // Silence internal libsignal-node noisy debug outputs
 const origStdout = process.stdout.write.bind(process.stdout);
@@ -310,11 +311,28 @@ class BaileysService {
 
       // Handle Incoming Messages for this specific branch
       session.sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return;
         for (const msg of messages) {
-          if (!msg.key.fromMe && msg.message) {
-            await this.handleIncomingMessage(bId, msg);
+          if (!msg.message) continue;
+
+          const senderJid = msg.key.remoteJid;
+          if (!senderJid || senderJid.endsWith('@g.us') || senderJid.endsWith('@broadcast')) continue;
+
+          // Check if user is messaging from their own phone to test
+          const myPhone = session.connectedUser?.id ? session.connectedUser.id.split(':')[0].split('@')[0] : null;
+          const isSelfChat = myPhone && senderJid.includes(myPhone);
+
+          // If fromMe: only allow if it's a self-test chat, otherwise ignore outgoing messages
+          if (msg.key.fromMe) {
+            if (!isSelfChat) continue;
+
+            const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
+            // Prevent infinite loop if this text was sent by bot itself
+            if (session.lastBotReply && (session.lastBotReply === text || session.lastBotReply.includes(text.slice(0, 30)))) {
+              continue;
+            }
           }
+
+          await this.handleIncomingMessage(bId, msg);
         }
       });
 
@@ -326,177 +344,126 @@ class BaileysService {
     }
   }
 
-  async handleIncomingMessage(msg) {
+  async handleIncomingMessage(arg1, arg2 = null) {
     try {
+      const branchId = arg2 !== null ? (parseInt(arg1, 10) || 1) : 1;
+      const msg = arg2 !== null ? arg2 : arg1;
+      if (!msg || !msg.key) return;
+
       const senderJid = msg.key.remoteJid;
-      if (!senderJid || senderJid.endsWith('@g.us')) return; // Ignore groups
+      if (!senderJid || senderJid.endsWith('@g.us') || senderJid.endsWith('@broadcast')) return; // Ignore groups/broadcasts
 
       const rawText = msg.message?.conversation ||
                       msg.message?.extendedTextMessage?.text ||
-                      msg.message?.imageMessage?.caption || '';
+                      msg.message?.imageMessage?.caption ||
+                      msg.message?.buttonsResponseMessage?.selectedButtonId ||
+                      msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+                      msg.message?.templateButtonReplyMessage?.selectedId || '';
       const text = rawText.trim();
       if (!text) return;
 
-      const senderPhone = senderJid.split('@')[0];
-      console.log(`[Baileys] Received WhatsApp message from ${senderPhone}: "${text}"`);
+      // Extract clean phone number (strip :device suffix)
+      let cleanPhone = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      if (senderJid.endsWith('@lid') && msg.key.participant) {
+        cleanPhone = msg.key.participant.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      }
+
+      console.log(`[Baileys] 📩 Received WhatsApp message from ${cleanPhone || senderJid}: "${text}"`);
+
+      // Determine reply target JID
+      let replyJid = senderJid;
+      if (!senderJid.endsWith('@lid') && cleanPhone) {
+        replyJid = `${cleanPhone}@s.whatsapp.net`;
+      }
 
       const branchManager = require('../../config/branchManager');
       const { branchStorage } = require('../../middleware/branchContext');
-      const branches = await branchManager.listBranches();
+      const pool = await branchManager.getBranchPool(branchId);
 
-      // 1. Check if tracking query (e.g., RPR-10001, 10001, rpr 10001, or BR01-RPR-00001)
-      const isPureNumber = /^\d{4,6}$/.test(text.trim());
-      const trackingMatch = text.match(/(?:(?:BR0?1|BR0?2)[-\s]?)?(?:RPR|REP)[-\s]?(\d+)/i) || 
-                            (text.toUpperCase().includes('RPR') ? [text] : null) ||
-                            (isPureNumber ? [text.trim()] : null);
-      if (trackingMatch) {
-        const queryTerm = text.trim();
-        const extractedNum = text.replace(/[^0-9]/g, '');
-        let matchedJob = null;
-        let matchedBranch = null;
-        let isPhoneVerified = false;
-        
-        for (const b of branches) {
-          try {
-            const pool = await branchManager.getBranchPool(b.id);
-            const jRes = await pool.query(
-              `SELECT * FROM repair_jobs 
-               WHERE UPPER(tracking_id) = UPPER($1) 
-                  OR UPPER(id) = UPPER($1) 
-                  OR UPPER(tracking_id) = UPPER($2)
-                  OR UPPER(id) = UPPER($2)
-                  OR (LENGTH($3) >= 4 AND (tracking_id LIKE $4 OR id LIKE $4))
-               LIMIT 1`,
-              [
-                queryTerm,
-                `RPR-${extractedNum}`,
-                extractedNum,
-                `%${extractedNum}%`
-              ]
-            );
-
-            if (jRes.rows.length > 0) {
-              const job = jRes.rows[0];
-              matchedJob = job;
-              matchedBranch = b;
-
-              // Verify sender phone number against registered job contact
-              const cleanJobContact = String(job.contact || '').replace(/[^0-9]/g, '');
-              const cleanSender = String(senderPhone).replace(/[^0-9]/g, '');
-              if (cleanJobContact && cleanSender && (cleanJobContact.includes(cleanSender.slice(-8)) || cleanSender.includes(cleanJobContact.slice(-8)))) {
-                isPhoneVerified = true;
-                const formattedReport = buildTrackingResponseTemplate({ job, safeNote: job.final_remarks });
-                await this.sendRawMessage(senderJid, formattedReport);
-                return;
-              }
-            }
-          } catch (e) {
-            console.warn(`[Baileys] Error checking tracking in branch ${b.id}:`, e.message);
-          }
-        }
-
-        // If job was found but phone did not match
-        if (matchedJob && !isPhoneVerified) {
-          await this.sendRawMessage(
-            senderJid,
-            `🔒 *Security Notice*\n\nRepair Job *${matchedJob.tracking_id}* was found in *${matchedBranch?.branch_name || 'System'}*, but your WhatsApp number is not registered for this job.\n\nFor privacy & security, please message from your registered phone number or contact branch support directly.`
-          );
+      await branchStorage.run({ branchId, pool }, async () => {
+        // 1. Check whatsapp_settings
+        const sRes = await pool.query('SELECT * FROM whatsapp_settings WHERE id = 1');
+        const settings = sRes.rows[0] || {};
+        if (settings.bot_enabled === false) {
+          console.log('[Baileys] WhatsApp bot is disabled in settings. Skipping automated reply.');
           return;
         }
-      }
 
-      // 2. Check if Approval reply (APPROVE / DECLINE / 1 / 2)
-      const upper = text.toUpperCase();
-      const isApprove = ['APPROVE', '1', 'YES', 'OK', 'ACCEPT'].includes(upper);
-      const isDecline = ['DECLINE', '2', 'NO', 'CANCEL'].includes(upper);
+        // 2. Find or create conversation in whatsapp_conversations
+        let conv = null;
+        const convRes = await pool.query(
+          'SELECT * FROM whatsapp_conversations WHERE contact = $1 OR contact LIKE $2 ORDER BY updated_at DESC LIMIT 1',
+          [cleanPhone, `%${cleanPhone.slice(-10)}%`]
+        );
 
-      if (isApprove || isDecline) {
-        for (const b of branches) {
-          try {
-            const pool = await branchManager.getBranchPool(b.id);
-            
-            // Priority A: Check for Active Additional Work Request for this sender's phone
-            const pendingWorkRes = await pool.query(
-              `SELECT awr.*, rj.contact FROM repair_additional_work_requests awr
-               JOIN repair_jobs rj ON awr.repair_job_id = rj.id
-               WHERE (rj.contact LIKE $1 OR rj.contact LIKE $2) AND awr.status = 'Pending Approval'
-               ORDER BY awr.created_at DESC LIMIT 1`,
-              [`%${senderPhone.slice(-9)}%`, `%${senderPhone}%`]
-            );
-
-            if (pendingWorkRes.rows.length > 0) {
-              const pReq = pendingWorkRes.rows[0];
-              
-              let resultTemplate = null;
-              await branchStorage.run({ branchId: b.id, pool }, async () => {
-                if (isApprove) {
-                  const res = await RepairService.approveAdditionalWorkRequest(
-                    pReq.repair_job_id,
-                    pReq.id,
-                    { name: 'WhatsApp Customer' },
-                    'WhatsApp',
-                    'Customer approved additional work via WhatsApp'
-                  );
-                  resultTemplate = buildAdditionalWorkApprovedTemplate({ job: res.job, workRequest: res.request });
-                } else if (isDecline) {
-                  const res = await RepairService.declineAdditionalWorkRequest(
-                    pReq.repair_job_id,
-                    pReq.id,
-                    { name: 'WhatsApp Customer' },
-                    'WhatsApp',
-                    'Customer declined additional work via WhatsApp'
-                  );
-                  resultTemplate = buildAdditionalWorkDeclinedTemplate({ job: res.job, workRequest: res.request });
-                }
-              });
-
-              if (resultTemplate) {
-                await this.sendRawMessage(senderJid, resultTemplate);
-                return;
-              }
-            }
-
-            // Priority B: Check for Diagnosis Job Quotation Approval
-            const pendingJob = await pool.query(
-              `SELECT * FROM repair_jobs 
-               WHERE (contact LIKE $1 OR contact LIKE $2) AND status = 'Waiting for Customer Approval' 
-               ORDER BY created_at DESC LIMIT 1`,
-              [`%${senderPhone.slice(-9)}%`, `%${senderPhone}%`]
-            );
-
-            if (pendingJob.rows.length > 0) {
-              const job = pendingJob.rows[0];
-              let resultTemplate = null;
-              
-              await branchStorage.run({ branchId: b.id, pool }, async () => {
-                if (isApprove) {
-                  const approvedJob = await RepairService.approveQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
-                  resultTemplate = buildApprovalConfirmationTemplate(approvedJob);
-                } else if (isDecline) {
-                  const declinedJob = await RepairService.declineQuote(job.id, { name: 'WhatsApp Customer' }, 'WhatsApp');
-                  resultTemplate = buildDeclineConfirmationTemplate(declinedJob);
-                }
-              });
-
-              if (resultTemplate) {
-                await this.sendRawMessage(senderJid, resultTemplate);
-                return;
-              }
-            }
-          } catch (bErr) {
-            console.warn(`[Baileys] Error processing approval in branch ${b.id}:`, bErr.message);
-          }
+        if (convRes.rows.length > 0) {
+          conv = convRes.rows[0];
+        } else {
+          const convId = await getNextEntityId('whatsapp_conversations', 'id', 'CONV', 4, pool);
+          const insRes = await pool.query(
+            `INSERT INTO whatsapp_conversations (id, contact, name, status, lead_type)
+             VALUES ($1, $2, $3, 'Bot Active', 'General') RETURNING *`,
+            [convId, cleanPhone || 'WhatsApp User', msg.pushName || 'WhatsApp Customer']
+          );
+          conv = insRes.rows[0];
         }
-      }
 
-      // 3. Fallback automated welcome message
-      const sRes = await db.query('SELECT * FROM whatsapp_settings WHERE id = 1');
-      const settings = sRes.rows[0] || {};
-      if (settings.bot_enabled !== false) {
-        const welcome = settings.welcome_message || 
-          `👋 Welcome to *${settings.business_name || 'Laptop Repairing Center'}*!\n\nTo check your repair status, please reply with your *Tracking ID* (e.g. *RPR-00123*).\n\n📍 *Shop Address:* ${settings.shop_location || 'Main Market'}\n📞 *Support:* ${settings.number || ''}`;
-        await this.sendRawMessage(senderJid, welcome);
-      }
+        // 3. Log incoming customer message in CRM
+        await pool.query(
+          `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag) VALUES ($1, 'in', $2, 'customer')`,
+          [conv.id, text]
+        );
+        await pool.query(
+          `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+          [text, conv.id]
+        );
+        emitEvent('whatsapp.message_added', { conversationId: conv.id, text, direction: 'in' });
+        emitEvent('whatsapp.conversation_updated', { conversationId: conv.id });
+
+        // 4. If conversation was handed off to a human agent, do not auto-reply
+        if (conv.status === 'Human Handoff' && text !== '1' && text !== '2' && text !== '3' && text !== '4' && text !== '5' && text.toLowerCase() !== 'menu') {
+          console.log(`[Baileys] Conversation ${conv.id} is in Human Handoff mode. Message logged in CRM for staff.`);
+          return;
+        }
+
+        // 5. Generate intelligent bot response via unified processBotReply
+        const whatsappRoutes = require('./whatsapp.routes');
+        let replyText = null;
+        if (typeof whatsappRoutes.processBotReply === 'function') {
+          replyText = await whatsappRoutes.processBotReply(text, conv, pool);
+        }
+
+        if (!replyText) {
+          replyText = settings.welcome_message || 
+            `👋 Welcome to *${settings.business_name || 'Retail & Repair Management'}*!\n\n` +
+            `How can we help you today? Please reply with a number:\n\n` +
+            `1️⃣ *Buy Laptop* (Browse Inventory)\n` +
+            `2️⃣ *Repair Service* (Book a Repair)\n` +
+            `3️⃣ *Track Repair* (Live Status of your Laptop)\n` +
+            `4️⃣ *Get Quotation* (Find by Budget)\n` +
+            `5️⃣ *Shop Location & Hours*\n` +
+            `6️⃣ *Talk to Human Agent*`;
+        }
+
+        // 6. Record bot reply text to avoid self-echo and send live via WhatsApp
+        const session = this.getSession(branchId);
+        session.lastBotReply = replyText.trim();
+
+        await this.sendRawMessage(replyJid, replyText, branchId);
+        console.log(`[Baileys] 🤖 Successfully sent automated reply to ${replyJid}: "${replyText.slice(0, 40)}..."`);
+
+        // 7. Log outgoing bot message in CRM
+        await pool.query(
+          `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag) VALUES ($1, 'out', $2, 'bot')`,
+          [conv.id, replyText]
+        );
+        await pool.query(
+          `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+          [replyText, conv.id]
+        );
+        emitEvent('whatsapp.message_added', { conversationId: conv.id, text: replyText, direction: 'out' });
+        emitEvent('whatsapp.conversation_updated', { conversationId: conv.id });
+      });
     } catch (err) {
       console.error('[Baileys] Error handling incoming WhatsApp message:', err);
     }
@@ -507,7 +474,16 @@ class BaileysService {
     if (!session.sock || !session.isConnected) {
       throw new Error(`WhatsApp is not connected for Branch ${branchId}. Please scan the QR code first.`);
     }
-    return await session.sock.sendMessage(jid, { text });
+
+    let targetJid = jid;
+    if (targetJid && !targetJid.includes('@g.us') && !targetJid.includes('@lid')) {
+      const clean = targetJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      if (clean) {
+        targetJid = `${clean}@s.whatsapp.net`;
+      }
+    }
+
+    return await session.sock.sendMessage(targetJid, { text });
   }
 
   async sendTextMessage(arg1, arg2, arg3 = null) {
@@ -539,6 +515,54 @@ class BaileysService {
     const jid = this.formatPhoneJid(phone);
     if (!jid) throw new Error(`Invalid phone number: "${phone}"`);
     return await session.sock.sendMessage(jid, { text });
+  }
+
+  /**
+   * Send PDF or document attachment with optional caption via Baileys WhatsApp
+   */
+  async sendDocumentMessage(arg1, arg2, arg3 = null, arg4 = '', arg5 = null) {
+    let branchId = 1;
+    let phone = null;
+    let documentBuffer = null;
+    let fileName = 'Document.pdf';
+    let caption = '';
+
+    if (arg5 !== null) {
+      // (branchId, phone, documentBuffer, fileName, caption)
+      branchId = parseInt(arg1, 10) || 1;
+      phone = arg2;
+      documentBuffer = arg3;
+      fileName = arg4 || 'Invoice.pdf';
+      caption = arg5 || '';
+    } else {
+      // (phone, documentBuffer, fileName, caption, branchIdOpt)
+      phone = arg1;
+      documentBuffer = arg2;
+      fileName = arg3 || 'Invoice.pdf';
+      caption = arg4 || '';
+      try {
+        const { branchStorage } = require('../../middleware/branchContext');
+        const store = branchStorage.getStore();
+        if (store && store.branchId) {
+          branchId = parseInt(store.branchId, 10) || 1;
+        }
+      } catch (e) {}
+    }
+
+    const session = this.getSession(branchId);
+    if (!session.sock || !session.isConnected) {
+      throw new Error(`WhatsApp is not connected for Branch ${branchId}. Please scan QR code first.`);
+    }
+
+    const jid = this.formatPhoneJid(phone);
+    if (!jid) throw new Error(`Invalid phone number: "${phone}"`);
+
+    return await session.sock.sendMessage(jid, {
+      document: documentBuffer,
+      mimetype: 'application/pdf',
+      fileName: fileName,
+      caption: caption || undefined
+    });
   }
 
   getStatus(branchId = 1) {

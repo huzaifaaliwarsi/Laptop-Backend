@@ -306,7 +306,7 @@ router.get('/settings', async (req, res, next) => {
 // PUT /api/whatsapp/settings
 router.put('/settings', async (req, res, next) => {
   try {
-    const { connected, number, businessName, botEnabled, humanHandoff, salesAccess, autoStatusNotifications, welcomeMessage, shopLocation } = req.body;
+    const { connected, number, businessName, botEnabled, humanHandoff, salesAccess, autoStatusNotifications, welcomeMessage, shopLocation, autoInvoiceWhatsapp } = req.body;
 
     const updateRes = await db.query(
       `UPDATE whatsapp_settings SET
@@ -319,10 +319,11 @@ router.put('/settings', async (req, res, next) => {
         auto_status_notifications = COALESCE($7, auto_status_notifications),
         welcome_message = COALESCE($8, welcome_message),
         shop_location = COALESCE($9, shop_location),
+        auto_invoice_whatsapp = COALESCE($10, auto_invoice_whatsapp),
         updated_at = CURRENT_TIMESTAMP
        WHERE id = 1
        RETURNING *`,
-      [connected, number, businessName, botEnabled, humanHandoff, salesAccess, autoStatusNotifications, welcomeMessage, shopLocation]
+      [connected, number, businessName, botEnabled, humanHandoff, salesAccess, autoStatusNotifications, welcomeMessage, shopLocation, autoInvoiceWhatsapp]
     );
 
     emitEvent('whatsapp.settings_updated', updateRes.rows[0]);
@@ -640,5 +641,6 @@ router.post('/send-test', async (req, res, next) => {
   }
 });
 
+router.processBotReply = processBotReply;
 module.exports = router;
 

@@ -1117,6 +1117,16 @@ class RepairService {
 
       emitEvent('repair.updated', refreshed.rows[0]);
 
+      // Auto-dispatch official PDF repair invoice via WhatsApp
+      if (refreshed.rows[0].invoice_id) {
+        try {
+          const InvoiceWhatsAppService = require('../invoices/invoice-whatsapp.service');
+          InvoiceWhatsAppService.sendInvoiceWhatsApp(refreshed.rows[0].invoice_id).catch(e => {
+            console.error('[deliverAndClose] WhatsApp repair invoice auto-send error:', e.message);
+          });
+        } catch (waErr) {}
+      }
+
       return refreshed.rows[0];
     });
   }

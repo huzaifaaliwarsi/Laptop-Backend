@@ -345,6 +345,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
         }
 
         emitEvent('invoice.created', invRes.rows[0]);
+        try {
+          const InvoiceWhatsAppService = require('../invoices/invoice-whatsapp.service');
+          InvoiceWhatsAppService.sendInvoiceWhatsApp(invRes.rows[0].id).catch(e => {
+            console.error('[inventory.routes] WhatsApp invoice auto-send error:', e.message);
+          });
+        } catch (waErr) {}
       }
 
       return productResult;
@@ -708,6 +714,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           );
 
           emitEvent('invoice.created', invRes.rows[0]);
+          try {
+            const InvoiceWhatsAppService = require('../invoices/invoice-whatsapp.service');
+            InvoiceWhatsAppService.sendInvoiceWhatsApp(invRes.rows[0].id).catch(e => {
+              console.error('[inventory.routes] WhatsApp invoice auto-send error:', e.message);
+            });
+          } catch (waErr) {}
         }
       }
 
