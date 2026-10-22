@@ -181,7 +181,7 @@ async function generateInvoicePdf(invoice) {
 
       // Header Grid: Address & Contact on Left, NTN / STRN / POS Table on Right
       doc.font('Helvetica').fontSize(8.5).fillColor('#111827');
-      doc.text(companyAddress.toUpperCase(), margin, curY, { width: 320 });
+      doc.text(companyAddress.toUpperCase(), margin, curY, { width: 320, height: 11, lineBreak: false, ellipsis: true });
       curY += 12;
 
       const contactParts = [];
@@ -189,7 +189,7 @@ async function generateInvoicePdf(invoice) {
       if (email) contactParts.push(`Email: ${email}`);
       const contactStr = contactParts.join(' | ');
       if (contactStr) {
-        doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(contactStr, margin, curY, { width: 320 });
+        doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(contactStr, margin, curY, { width: 320, height: 10, lineBreak: false, ellipsis: true });
       }
 
       // Tax Table on Right
@@ -263,32 +263,37 @@ async function generateInvoicePdf(invoice) {
       const stRegNo = invoice.stRegNo || '—';
       const taxId = invoice.partyTaxId || invoice.ntnCnic || invoice.ntn || invoice.ntnTaxId || '—';
 
+      // Every value drawn at a fixed y inside these boxes is capped to a single line
+      // (width + height + ellipsis) so a long name/address/etc. can never wrap and
+      // bleed into the row below it — only truncates with "…" instead.
+      const line1 = { lineBreak: false, ellipsis: true, height: 10 };
+
       doc.font('Helvetica-Oblique').fontSize(8).fillColor('#111827').text('To: M/s', leftBoxX + 8, curY + 6);
-      doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(partyName, leftBoxX + 64, curY + 6, { width: boxW - 72, lineBreak: false, ellipsis: true });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(partyName, leftBoxX + 64, curY + 6, { width: boxW - 72, ...line1 });
 
       doc.font('Helvetica-Oblique').fontSize(8).fillColor('#111827').text('Address', leftBoxX + 8, curY + 19);
-      doc.font('Helvetica').fontSize(8).fillColor('#000000').text(partyAddress, leftBoxX + 64, curY + 19, { width: boxW - 72, lineBreak: false, ellipsis: true });
+      doc.font('Helvetica').fontSize(8).fillColor('#000000').text(partyAddress, leftBoxX + 64, curY + 19, { width: boxW - 72, ...line1 });
 
       doc.font('Helvetica-Oblique').fontSize(8).fillColor('#111827').text('Telephone', leftBoxX + 8, curY + 32);
-      doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(partyContact, leftBoxX + 64, curY + 32, { width: boxW - 72, lineBreak: false, ellipsis: true });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(partyContact, leftBoxX + 64, curY + 32, { width: boxW - 72, ...line1 });
 
       // Bottom Row of Left Box: ST Reg No & N.T.N / C.N.I.C
       const partyBotY = curY + 48;
       doc.font('Helvetica-Oblique').fontSize(7.5).fillColor('#111827').text('ST Reg No', leftBoxX + 8, partyBotY);
-      doc.font('Helvetica').fontSize(7.5).fillColor('#000000').text(stRegNo, leftBoxX + 58, partyBotY, { width: 55, lineBreak: false, ellipsis: true });
+      doc.font('Helvetica').fontSize(7.5).fillColor('#000000').text(stRegNo, leftBoxX + 58, partyBotY, { width: 55, ...line1 });
 
       doc.font('Helvetica-Oblique').fontSize(7.5).fillColor('#111827').text('N.T.N / C.N.I.C', leftBoxX + 120, partyBotY);
-      doc.font('Helvetica').fontSize(7.5).fillColor('#000000').text(taxId, leftBoxX + 190, partyBotY, { width: boxW - 198, lineBreak: false, ellipsis: true });
+      doc.font('Helvetica').fontSize(7.5).fillColor('#000000').text(taxId, leftBoxX + 190, partyBotY, { width: boxW - 198, ...line1 });
 
       if (isRepairInvoice && invoice.repairDetails) {
         const repY = curY + 61;
         doc.moveTo(leftBoxX + 6, repY).lineTo(leftBoxX + boxW - 6, repY).lineWidth(0.5).dash(2, { space: 2 }).strokeColor('#6b7280').stroke();
         doc.undash();
         doc.font('Helvetica-Oblique').fontSize(7.5).fillColor('#111827').text('Device:', leftBoxX + 8, repY + 4);
-        doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#000000').text(`${invoice.repairDetails.brand || ''} ${invoice.repairDetails.model || ''}`, leftBoxX + 46, repY + 4, { width: boxW - 54, lineBreak: false, ellipsis: true });
+        doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#000000').text(`${invoice.repairDetails.brand || ''} ${invoice.repairDetails.model || ''}`, leftBoxX + 46, repY + 4, { width: boxW - 54, ...line1 });
         if (invoice.repairDetails.problem) {
           doc.font('Helvetica-Oblique').fontSize(7.5).fillColor('#dc2626').text('Problem:', leftBoxX + 8, repY + 13);
-          doc.font('Helvetica').fontSize(7.5).fillColor('#dc2626').text(invoice.repairDetails.problem, leftBoxX + 46, repY + 13, { width: boxW - 54, lineBreak: false, ellipsis: true });
+          doc.font('Helvetica').fontSize(7.5).fillColor('#dc2626').text(invoice.repairDetails.problem, leftBoxX + 46, repY + 13, { width: boxW - 54, ...line1 });
         }
       }
 
@@ -299,19 +304,19 @@ async function generateInvoicePdf(invoice) {
       const refId = invoice.referenceId || invoice.paymentReference || '';
 
       doc.font('Helvetica-Oblique').fontSize(8).fillColor('#111827').text('Terms of Payment', rightBoxX + 8, curY + 6);
-      doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(paymentMethod, rightBoxX + 96, curY + 6, { width: boxW - 104, lineBreak: false, ellipsis: true });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(paymentMethod, rightBoxX + 96, curY + 6, { width: boxW - 104, ...line1 });
 
       doc.font('Helvetica-Oblique').fontSize(8).fillColor('#111827').text('Payment Status', rightBoxX + 8, curY + 19);
-      doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(paymentStatus, rightBoxX + 96, curY + 19, { width: boxW - 104, lineBreak: false, ellipsis: true });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#000000').text(paymentStatus, rightBoxX + 96, curY + 19, { width: boxW - 104, ...line1 });
 
       if (refId) {
         doc.font('Helvetica-Oblique').fontSize(8).fillColor('#111827').text('Reference / Slip', rightBoxX + 8, curY + 32);
-        doc.font('Helvetica').fontSize(8).fillColor('#000000').text(refId, rightBoxX + 96, curY + 32, { width: boxW - 104, lineBreak: false, ellipsis: true });
+        doc.font('Helvetica').fontSize(8).fillColor('#000000').text(refId, rightBoxX + 96, curY + 32, { width: boxW - 104, ...line1 });
       }
 
       const rightBotY = curY + (isRepairInvoice ? 64 : 48);
       doc.font('Helvetica-Oblique').fontSize(8).fillColor('#111827').text('Sales Person / Tech', rightBoxX + 8, rightBotY);
-      doc.font('Helvetica').fontSize(8).fillColor('#000000').text(staff, rightBoxX + 96, rightBotY, { width: boxW - 104, lineBreak: false, ellipsis: true });
+      doc.font('Helvetica').fontSize(8).fillColor('#000000').text(staff, rightBoxX + 96, rightBotY, { width: boxW - 104, ...line1 });
 
       curY += boxH + 12;
 
@@ -383,17 +388,17 @@ async function generateInvoicePdf(invoice) {
           doc.text(String(idx + 1), cols.sr.x, curY, { width: cols.sr.w, align: 'center' });
 
           const itemName = item.name || item.description || 'Product / Item';
-          doc.font('Helvetica-Bold').text(itemName, cols.desc.x, curY, { width: cols.desc.w, lineBreak: false, ellipsis: true });
+          doc.font('Helvetica-Bold').text(itemName, cols.desc.x, curY, { width: cols.desc.w, height: 10, lineBreak: false, ellipsis: true });
 
           const hasSubDesc = item.description && item.description !== itemName;
           if (hasSubDesc) {
             doc.font('Helvetica').fontSize(7).fillColor('#4b5563')
-              .text(item.description, cols.desc.x, curY + 9, { width: cols.desc.w, lineBreak: false, ellipsis: true });
+              .text(item.description, cols.desc.x, curY + 9, { width: cols.desc.w, height: 9, lineBreak: false, ellipsis: true });
           }
 
           doc.font('Helvetica').fontSize(8).fillColor('#000000');
           const itemCode = item.hsCode || item.hs_code || item.productCode || item.code || '—';
-          doc.text(itemCode, cols.code.x, curY, { width: cols.code.w, lineBreak: false, ellipsis: true });
+          doc.text(itemCode, cols.code.x, curY, { width: cols.code.w, height: 10, lineBreak: false, ellipsis: true });
           doc.text(qty.toFixed(2), cols.qty.x, curY, { width: cols.qty.w, align: 'center' });
           doc.text(numStr(rate), cols.rate.x, curY, { width: cols.rate.w, align: 'right' });
           doc.text(numStr(gross), cols.amount.x, curY, { width: cols.amount.w, align: 'right' });
@@ -428,11 +433,13 @@ async function generateInvoicePdf(invoice) {
       // Left Column: Amount in Words
       const leftColW = 280;
       doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#000000').text('Amount in Words :', margin, curY);
-      doc.font('Helvetica').fontSize(8.5).fillColor('#111827').text(amountInWordsPKR(totalAmount), margin, curY + 12, { width: leftColW });
+      doc.font('Helvetica').fontSize(8.5).fillColor('#111827')
+        .text(amountInWordsPKR(totalAmount), margin, curY + 12, { width: leftColW, height: 20 });
 
       if (invoice.remarks) {
         doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#374151').text('Remarks:', margin, curY + 36);
-        doc.font('Helvetica').fontSize(7.5).fillColor('#4b5563').text(invoice.remarks, margin + 42, curY + 36, { width: leftColW - 42 });
+        doc.font('Helvetica').fontSize(7.5).fillColor('#4b5563')
+          .text(invoice.remarks, margin + 42, curY + 36, { width: leftColW - 42, height: 18 });
       }
 
       // Document Verification # (Centered horizontally below Amount in Words)
@@ -472,7 +479,8 @@ async function generateInvoicePdf(invoice) {
         renderSumRow('Remaining Balance Rs.', balanceAmount, true, false, '#dc2626');
       }
 
-      // Verification QR Code on far right below summary
+      // Verification QR Code — stacked below the Document Verification # block so it
+      // never overlaps the financial summary box on the right.
       try {
         const qrPayload = JSON.stringify({
           inv: invNo,
@@ -482,7 +490,14 @@ async function generateInvoicePdf(invoice) {
           fbr: invoice.fbrInvoiceNo || undefined
         });
         const qrBuf = await QRCode.toBuffer(qrPayload, { margin: 0, width: 80 });
-        doc.image(qrBuf, margin + contentWidth - 68, docVerY - 4, { width: 64, height: 64 });
+        const qrSize = 54;
+        const qrColX = margin + 110;
+        const qrColW = 160;
+        const qrX = qrColX + (qrColW - qrSize) / 2;
+        const qrY = docVerY + 26;
+        doc.image(qrBuf, qrX, qrY, { width: qrSize, height: qrSize });
+        doc.font('Helvetica').fontSize(6.5).fillColor('#6b7280')
+          .text('Scan to verify', qrColX, qrY + qrSize + 3, { width: qrColW, align: 'center' });
       } catch (qrErr) {
         console.warn('[InvoicePDF] QR code error:', qrErr.message);
       }

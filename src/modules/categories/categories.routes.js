@@ -11,11 +11,11 @@ router.get('/', cacheRoute(300), async (req, res, next) => {
   try {
     const [prodRes, expRes, accRes, repRes] = await Promise.all([
       db.query(`
-        SELECT pc.id, pc.name, pc.code_prefix, pc.is_system, pc.created_at,
+        SELECT pc.id, pc.name, pc.code_prefix, pc.is_system, pc.custom_fields, pc.created_at,
                COUNT(p.id)::int AS product_count
         FROM product_categories pc
         LEFT JOIN products p ON (p.category_id = pc.id OR LOWER(p.category_name) = LOWER(pc.name))
-        GROUP BY pc.id, pc.name, pc.code_prefix, pc.is_system, pc.created_at
+        GROUP BY pc.id, pc.name, pc.code_prefix, pc.is_system, pc.custom_fields, pc.created_at
         ORDER BY pc.id ASC
       `),
       db.query('SELECT id, name FROM expense_categories ORDER BY id ASC'),
@@ -48,11 +48,11 @@ router.get('/', cacheRoute(300), async (req, res, next) => {
 router.get('/product', cacheRoute(300), async (req, res, next) => {
   try {
     const result = await db.query(`
-      SELECT pc.id, pc.name, pc.code_prefix, pc.is_system, pc.created_at,
+      SELECT pc.id, pc.name, pc.code_prefix, pc.is_system, pc.custom_fields, pc.created_at,
              COUNT(p.id)::int AS product_count
       FROM product_categories pc
       LEFT JOIN products p ON (p.category_id = pc.id OR LOWER(p.category_name) = LOWER(pc.name))
-      GROUP BY pc.id, pc.name, pc.code_prefix, pc.is_system, pc.created_at
+      GROUP BY pc.id, pc.name, pc.code_prefix, pc.is_system, pc.custom_fields, pc.created_at
       ORDER BY pc.id ASC
     `);
     return res.json({
@@ -66,7 +66,7 @@ router.get('/product', cacheRoute(300), async (req, res, next) => {
 
 router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
-    const { name, codePrefix } = req.body;
+    const { name, codePrefix, customFields } = req.body;
     if (!name || String(name).trim() === '') {
       return res.status(400).json({
         success: false,
@@ -77,6 +77,7 @@ router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res,
 
     const cleanName = String(name).trim();
     const prefix = codePrefix ? String(codePrefix).trim().toUpperCase() : cleanName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'PRD';
+    const fieldsJson = JSON.stringify(Array.isArray(customFields) ? customFields : []);
 
     // Check duplicate
     const existing = await db.query('SELECT id, name FROM product_categories WHERE LOWER(name) = LOWER($1)', [cleanName]);
@@ -89,8 +90,8 @@ router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res,
     }
 
     const insertRes = await db.query(
-      `INSERT INTO product_categories (name, code_prefix, is_system) VALUES ($1, $2, FALSE) RETURNING id, name, code_prefix, is_system`,
-      [cleanName, prefix]
+      `INSERT INTO product_categories (name, code_prefix, is_system, custom_fields) VALUES ($1, $2, FALSE, $3::jsonb) RETURNING id, name, code_prefix, is_system, custom_fields`,
+      [cleanName, prefix, fieldsJson]
     );
 
     const newCategory = { ...insertRes.rows[0], product_count: 0 };
@@ -110,7 +111,7 @@ router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res,
 router.put('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, codePrefix } = req.body;
+    const { name, codePrefix, customFields } = req.body;
     if (!name || String(name).trim() === '') {
       return res.status(400).json({
         success: false,
@@ -132,10 +133,19 @@ router.put('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, r
       });
     }
 
-    const updated = await db.query(
-      `UPDATE product_categories SET name = $1, code_prefix = $2 WHERE id = $3 RETURNING id, name, code_prefix, is_system`,
-      [cleanName, prefix, id]
-    );
+    let updated;
+    if (customFields !== undefined) {
+      const fieldsJson = JSON.stringify(Array.isArray(customFields) ? customFields : []);
+      updated = await db.query(
+        `UPDATE product_categories SET name = $1, code_prefix = $2, custom_fields = $3::jsonb WHERE id = $4 RETURNING id, name, code_prefix, is_system, custom_fields`,
+        [cleanName, prefix, fieldsJson, id]
+      );
+    } else {
+      updated = await db.query(
+        `UPDATE product_categories SET name = $1, code_prefix = $2 WHERE id = $3 RETURNING id, name, code_prefix, is_system, custom_fields`,
+        [cleanName, prefix, id]
+      );
+    }
 
     if (updated.rows.length === 0) {
       return res.status(404).json({

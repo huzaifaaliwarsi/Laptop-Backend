@@ -179,15 +179,24 @@ function paymentStatus(total, paid) {
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const category = req.body.category || req.body.categoryName;
-    const { brand, model, quantity } = req.body;
-    if (!category || !brand || !model || !quantity) {
+    const { quantity } = req.body;
+    if (!category || !quantity) {
       return res.status(400).json({
         success: false,
         code: 'MISSING_FIELDS',
-        message: 'Category, Brand, Model and Quantity are required.'
+        message: 'Category and Quantity are required.'
       });
     }
 
+    const firstCustomVal = req.body.customFields && typeof req.body.customFields === 'object'
+      ? Object.values(req.body.customFields).find(v => v && String(v).trim())
+      : null;
+
+    const brand = req.body.brand || req.body.customFields?.Brand || req.body.customFields?.brand || category;
+    const model = req.body.model || req.body.productName || req.body.customFields?.Model || req.body.customFields?.['Model / Product Name'] || firstCustomVal || category;
+
+    req.body.brand = brand;
+    req.body.model = model;
     req.body.category = category;
     req.body.categoryName = category;
 
@@ -471,6 +480,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           purchase_invoice_no = CASE WHEN $23::varchar IS NOT NULL THEN $23 ELSE purchase_invoice_no END,
           current_stock = CASE WHEN $24::integer IS NOT NULL THEN $24 ELSE current_stock END,
           stock_in = CASE WHEN $24::integer IS NOT NULL THEN $24 ELSE stock_in END,
+          custom_fields = CASE WHEN $26::jsonb IS NOT NULL THEN $26::jsonb ELSE custom_fields END,
           updated_at = CURRENT_TIMESTAMP
          WHERE id = $25
          RETURNING *`,
@@ -482,7 +492,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           vName !== undefined ? vName : null,
           invNo !== undefined ? invNo : null,
           req.body.quantity !== undefined ? effectiveQty : null,
-          id
+          id,
+          req.body.customFields ? JSON.stringify(req.body.customFields) : null
         ]
       );
 

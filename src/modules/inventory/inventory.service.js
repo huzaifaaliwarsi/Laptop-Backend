@@ -24,6 +24,11 @@ function buildSpecifications(data) {
   if (data.graphicsCard) parts.push(`Graphics: ${data.graphicsCard}`);
   if (data.accessoryCategory) parts.push(`Accessory Category: ${data.accessoryCategory}`);
   if (data.description) parts.push(`Description: ${data.description}`);
+  if (data.customFields && typeof data.customFields === 'object') {
+    Object.entries(data.customFields).forEach(([k, v]) => {
+      if (v && String(v).trim()) parts.push(`${k}: ${String(v).trim()}`);
+    });
+  }
   if (data.others) parts.push(`Others: ${data.others}`);
   return parts.join(' | ');
 }
@@ -36,6 +41,7 @@ class InventoryService {
         p.id, p.code, p.inventory_type, p.category_id, p.category_name, p.brand, p.model,
         p.product_name, p.screen_size, p.processor, p.ram, p.rom_ssd, p.hard_drive,
         p.graphics_card, p.accessory_category, p.description, p.others, p.specifications,
+        p.custom_fields,
         p.condition, p.initial_stock, p.stock_in, p.stock_out, p.current_stock, p.low_stock_alert,
         ${userRole === 'technician' ? '0.00 as cost_price' : 'p.cost_price'},
         p.expected_sale_price, p.remarks, p.source_type, p.source_id, p.source_name,
@@ -312,16 +318,18 @@ class InventoryService {
     const code = await getNextProductCode(categoryId, client);
     const productId = await getNextEntityId('products', 'id', 'PRD', 4, client);
 
+    const customFieldsJson = JSON.stringify(productData.customFields || productData.custom_fields || {});
+
     const insertRes = await client.query(
       `INSERT INTO products (
         id, code, inventory_type, category_id, category_name, brand, model, product_name,
         screen_size, processor, ram, rom_ssd, hard_drive, graphics_card, accessory_category,
-        description, others, specifications, condition, initial_stock, stock_in, stock_out,
+        description, others, specifications, custom_fields, condition, initial_stock, stock_in, stock_out,
         current_stock, low_stock_alert, cost_price, expected_sale_price, remarks, source_type,
         source_id, source_name, purchase_invoice_no, date_added
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-        $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32
+        $19::jsonb, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33
       ) RETURNING *`,
       [
         productId,
@@ -329,9 +337,9 @@ class InventoryService {
         productData.inventoryType || 'Vendor Purchased',
         categoryId,
         categoryName,
-        productData.brand,
-        productData.model,
-        productData.productName || productData.model,
+        productData.brand || categoryName || 'Generic',
+        productData.model || productData.productName || categoryName || 'Item',
+        productData.productName || productData.model || categoryName || 'Item',
         productData.screenSize || null,
         productData.processor || null,
         productData.ram || null,
@@ -342,6 +350,7 @@ class InventoryService {
         productData.description || null,
         productData.others || null,
         specifications,
+        customFieldsJson,
         productData.condition || 'Used',
         quantity, // initial_stock
         quantity, // stock_in
