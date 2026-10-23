@@ -12,9 +12,37 @@ initSocket(server, process.env.CORS_ORIGIN || 'http://localhost:3000');
 
 // Initialize Baileys WhatsApp Multi-Device connection (only if active session already exists)
 const baileysService = require('./modules/whatsapp/baileys.service');
-baileysService.initWhatsAppIfSessionExists().catch(err => console.error('[Baileys] WhatsApp initialization error:', err));
+let startupRetry;
+let stopping = false;
+async function restoreWhatsApp() {
+  try {
+    await baileysService.initWhatsAppIfSessionExists();
+  } catch (err) {
+    console.error('[Baileys] Session recovery failed; retrying in 10s:', err.message);
+    if (!stopping) startupRetry = setTimeout(restoreWhatsApp, 10000);
+  }
+}
+restoreWhatsApp();
 
 server.listen(PORT, () => {
   console.log(`[Express API Server] Running on http://localhost:${PORT}`);
 });
+
+async function shutdown() {
+  if (stopping) return;
+  stopping = true;
+  clearTimeout(startupRetry);
+  server.close();
+  const deadline = setTimeout(() => process.exit(1), 15000);
+  deadline.unref();
+  try {
+    await baileysService.shutdown();
+    process.exit(0);
+  } catch (error) {
+    console.error('[Baileys] Shutdown failed:', error.message);
+    process.exit(1);
+  }
+}
+process.once('SIGTERM', shutdown);
+process.once('SIGINT', shutdown);
 
