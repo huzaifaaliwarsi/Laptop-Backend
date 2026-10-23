@@ -581,13 +581,38 @@ const baileys = require('./baileys.service');
 // GET /api/whatsapp/status - Live multi-device connection status & QR code
 router.get('/status', async (req, res, next) => {
   try {
-  const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
-  const status = await baileys.getStatus(branchId);
-  res.setHeader('Cache-Control', 'no-store');
-  return res.json({
-    success: true,
-    data: status
-  });
+    const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
+    let status = await baileys.getStatus(branchId);
+
+    // If not connected in-memory yet, check database whatsapp_settings so refresh renders connected immediately
+    if (!status.connected) {
+      try {
+        const branchManager = require('../../config/branchManager');
+        const pool = await branchManager.getBranchPool(branchId);
+        const { rows } = await pool.query(
+          'SELECT connected, is_connected, number, business_name FROM whatsapp_settings WHERE id = $1',
+          [branchId]
+        );
+        const settingsRow = rows[0];
+        if (settingsRow && (settingsRow.connected || settingsRow.is_connected)) {
+          status = {
+            ...status,
+            connected: true,
+            authenticated: true,
+            phone: settingsRow.number || status.phone,
+            name: settingsRow.business_name || status.name
+          };
+          // Trigger background connection if idle
+          baileys.initWhatsAppIfSessionExists(branchId).catch(() => {});
+        }
+      } catch (_) {}
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      success: true,
+      data: status
+    });
   } catch (error) { next(error); }
 });
 
