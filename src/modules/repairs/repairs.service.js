@@ -259,7 +259,7 @@ class RepairService {
       // Dispatch live message to WhatsApp via Baileys if connected
       try {
         const baileys = require('../whatsapp/baileys.service');
-        if (baileys.isConnected) {
+        if (await baileys.isCurrentBranchConnected()) {
           await baileys.sendTextMessage(cleanContact, messageText);
           console.log(`[Baileys] Successfully sent automated WhatsApp message to ${cleanContact}`);
         } else {
@@ -1798,7 +1798,7 @@ class RepairService {
         // Dispatch live message to WhatsApp via Baileys if connected
         try {
           const baileys = require('../whatsapp/baileys.service');
-          if (baileys.isConnected) {
+          if (await baileys.isCurrentBranchConnected()) {
             await baileys.sendTextMessage(job.contact, approvalMsg);
             console.log(`[Baileys] Sent additional work quote to customer ${job.contact}`);
           }

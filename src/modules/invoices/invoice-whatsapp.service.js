@@ -151,7 +151,7 @@ class InvoiceWhatsAppService {
       }
 
       // 5. Send live document via Baileys if WhatsApp is connected
-      const isConnected = baileys.isBranchConnected(branchId) || baileys.isConnected;
+      const isConnected = await baileys.isBranchConnected(branchId);
       if (!isConnected) {
         console.log(`[InvoiceWhatsApp] WhatsApp device not currently connected for Branch ${branchId}. Invoice logged in CRM.`);
         return {

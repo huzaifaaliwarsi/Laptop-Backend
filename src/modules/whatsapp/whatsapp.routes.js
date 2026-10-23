@@ -469,7 +469,7 @@ router.post('/messages/send', async (req, res, next) => {
       const contactPhone = convRes.rows[0].contact;
       const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
       try {
-        if (baileys.isBranchConnected(branchId)) {
+        if (await baileys.isBranchConnected(branchId)) {
           await baileys.sendTextMessage(branchId, contactPhone, text.trim());
           console.log(`[Baileys Branch ${branchId}] Agent message successfully dispatched to ${contactPhone}`);
         }
@@ -579,13 +579,16 @@ router.patch('/conversations/:id/handoff', async (req, res, next) => {
 const baileys = require('./baileys.service');
 
 // GET /api/whatsapp/status - Live multi-device connection status & QR code
-router.get('/status', (req, res) => {
+router.get('/status', async (req, res, next) => {
+  try {
   const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
-  const status = baileys.getStatus(branchId);
+  const status = await baileys.getStatus(branchId);
+  res.setHeader('Cache-Control', 'no-store');
   return res.json({
     success: true,
     data: status
   });
+  } catch (error) { next(error); }
 });
 
 // POST /api/whatsapp/connect - Force generate QR code & start connection

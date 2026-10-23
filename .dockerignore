@@ -1,0 +1,10 @@
+node_modules
+.git
+.env
+.env.*
+.whatsapp_session
+whatsapp_auth_session
+logs
+*.log
+scratch
+.vercel

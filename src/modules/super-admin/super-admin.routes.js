@@ -1307,7 +1307,7 @@ router.post('/branches/:id/delete', requireSuperAdmin, async (req, res, next) =>
     // Clean up WhatsApp auth session for this branch
     try {
       const baileys = require('../whatsapp/baileys.service');
-      baileys.clearAuthSession(branchId);
+      await baileys.clearAuthSession(branchId);
     } catch (waErr) {}
 
     // Release staff usernames/phones from Master Identity Registry

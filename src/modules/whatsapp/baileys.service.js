@@ -182,6 +182,8 @@ class BaileysService {
     return session.initializing;
   }
 
+  async isCurrentBranchConnected() { return this.isConnected; }
+
   async initializeSocket(branchId = 1) {
     const bId = parseInt(branchId, 10) || 1;
     const session = this.getSession(bId);
@@ -199,9 +201,9 @@ class BaileysService {
 
     const authDir = getAuthDir(bId);
     try {
-      if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+      if ((process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) && process.env.WHATSAPP_WORKER !== '1') {
         session.isConnecting = false;
-        session.lastError = 'WhatsApp requires the persistent Node backend (npm start). Point the frontend API URL to that backend.';
+        session.lastError = 'WhatsApp is handled by the Vercel whatsapp daemon.';
         this.emitStatus(bId);
         return;
       }
@@ -701,6 +703,7 @@ class BaileysService {
     const session = this.getSession(bId);
     session.updatedAt = Math.max(Date.now(), session.updatedAt + 1);
     const status = this.getStatus(bId);
+    if (this.publishWorkerStatus) this.publishWorkerStatus(bId, status);
     try {
       const { getIO } = require('../../config/socket');
       const io = getIO();
@@ -798,4 +801,5 @@ class BaileysService {
 }
 
 const baileysInstance = new BaileysService();
-module.exports = baileysInstance;
+module.exports = process.env.VERCEL && process.env.WHATSAPP_WORKER !== '1'
+  ? require('./remote.service') : baileysInstance;

@@ -1,6 +1,16 @@
 {
   "version": 2,
   "regions": ["sin1"],
+  "functions": { "api/index.js": { "maxDuration": 60 } },
+  "daemons": {
+    "whatsapp": {
+      "root": ".",
+      "entrypoint": "Dockerfile.whatsapp",
+      "instances": { "sin1": 1 },
+      "resources": { "requests": { "memory": "1Gi" } },
+      "terminationGracePeriodSeconds": 60
+    }
+  },
   "rewrites": [
     {
       "source": "/(.*)",
