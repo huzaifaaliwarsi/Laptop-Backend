@@ -802,29 +802,53 @@ class BaileysService {
     if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
     session.reconnectTimer = null;
     if (session.initializing) await session.initializing;
-    // Wait for a concurrent initialization to release its ownership before retrying logout.
+
     let auth = session.auth;
     if (!auth) {
-      const branchManager = require('../../config/branchManager');
-      const pool = await branchManager.getBranchPool(bId);
-      auth = await authStore.openAuthStore(pool, bId, getAuthDir(bId), await getBaileys(), () => {});
+      try {
+        const branchManager = require('../../config/branchManager');
+        const pool = await branchManager.getBranchPool(bId);
+        auth = await authStore.openAuthStore(pool, bId, getAuthDir(bId), await getBaileys(), () => {}, true);
+      } catch (_) {}
     }
+
     const sock = session.sock;
     if (sock) {
       sock.ev?.removeAllListeners?.();
-      await sock.logout().catch(error => console.warn(`[Baileys] Remote logout failed for ${bId}:`, error.message));
+      try { await sock.logout(); } catch (error) { console.warn(`[Baileys] Logout error for ${bId}:`, error.message); }
     }
     this.retireSocket(session);
-    try { await auth.clear(); } finally { await auth.close(); session.auth = null; }
+
+    if (auth) {
+      try { await auth.clear(); } catch (_) {}
+      try { await auth.close(); } catch (_) {}
+      if (session.auth === auth) session.auth = null;
+    }
     this.clearAuthSession(bId);
-    session.requiresRelink = false;
-    session.lastError = null;
+
+    // Guaranteed Direct Database Reset
     try {
       const branchManager = require('../../config/branchManager');
       const pool = await branchManager.getBranchPool(bId);
-      await authStore.releaseLease(pool, bId);
-      await pool.query(`UPDATE whatsapp_settings SET connected = FALSE, is_connected = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = 1`);
-    } catch (e) {}
+      await pool.query('DELETE FROM whatsapp_auth_state WHERE branch_id = $1', [bId]);
+      await pool.query('DELETE FROM whatsapp_auth_leases WHERE branch_id = $1', [bId]);
+      await pool.query(
+        `UPDATE whatsapp_settings 
+         SET connected = FALSE, is_connected = FALSE, number = NULL, updated_at = CURRENT_TIMESTAMP 
+         WHERE id = $1`,
+        [bId]
+      );
+    } catch (dbErr) {
+      console.error('[Baileys] Error resetting whatsapp_settings on disconnect:', dbErr.message);
+    }
+
+    session.requiresRelink = false;
+    session.lastError = null;
+    session.isConnected = false;
+    session.isConnecting = false;
+    session.qrCodeDataUrl = null;
+    session.connectedUser = null;
+
     this.emitStatus(bId);
     return { success: true, message: `WhatsApp session for Branch ${bId} disconnected & logged out` };
   }

@@ -36,7 +36,7 @@ async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force 
     if (closed) return;
     closed = true;
     clearInterval(heartbeat);
-    await queue.catch(() => {});
+    await queue.catch(() => { });
     try {
       await client.query('DELETE FROM whatsapp_auth_leases WHERE branch_id = $1 AND owner = $2', [branchId, owner]);
     } finally { client.release(true); }
@@ -56,7 +56,7 @@ async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force 
         const value = await task();
         await client.query('COMMIT');
         return value;
-      } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+      } catch (error) { await client.query('ROLLBACK').catch(() => { }); throw error; }
     });
     queue = result.catch(fail);
     return result;
@@ -108,7 +108,7 @@ async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force 
     // Logout leaves an empty tombstone, not usable pairing credentials.
     const creds = previous && Object.keys(previous).length ? previous : baileys.initAuthCreds();
     const keyCache = new Map(rows.map(row => [row.key, row.value]));
-    heartbeat = setInterval(() => { run(async () => {}).catch(() => {}); }, 15000);
+    heartbeat = setInterval(() => { run(async () => { }).catch(() => { }); }, 15000);
     heartbeat.unref?.();
     return {
       state: {
@@ -149,9 +149,9 @@ async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force 
       saveCreds: () => { const value = encode(creds); return run(() => put('creds.json', value)); },
       flush: () => queue,
       clear: () => run(async () => {
-          await client.query('DELETE FROM whatsapp_auth_state WHERE branch_id = $1', [branchId]);
-          await put('creds.json', '{}');
-          await put('_migrated', 'true');
+        await client.query('DELETE FROM whatsapp_auth_state WHERE branch_id = $1', [branchId]);
+        await put('creds.json', '{}');
+        await put('_migrated', 'true');
       }),
       close
     };
@@ -161,7 +161,7 @@ async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force 
 async function releaseLease(pool, branchId) {
   try {
     await pool.query('DELETE FROM whatsapp_auth_leases WHERE branch_id = $1', [branchId]);
-  } catch (_) {}
+  } catch (_) { }
 }
 
 module.exports = { openAuthStore, hasSavedSession, releaseLease };
