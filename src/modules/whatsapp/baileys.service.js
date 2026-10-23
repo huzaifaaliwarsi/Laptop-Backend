@@ -147,6 +147,7 @@ class BaileysService {
   }
 
   async initWhatsAppIfSessionExists(targetBranchId = null) {
+    if (process.env.VERCEL) return;
     if (targetBranchId) {
       const bId = parseInt(targetBranchId, 10);
       if (await this.hasSavedSession(bId)) {
@@ -385,15 +386,32 @@ class BaileysService {
           const senderJid = msg.key.remoteJid;
           if (!senderJid || senderJid.endsWith('@g.us') || senderJid.endsWith('@broadcast')) continue;
 
-          // Check if user is messaging from their own phone to test
+          // Check if user is messaging from their own phone to test (supports both Phone and LID)
           const myPhone = session.connectedUser?.id ? session.connectedUser.id.split(':')[0].split('@')[0] : null;
-          const isSelfChat = myPhone && senderJid.includes(myPhone);
+          const myLid = session.connectedUser?.lid ? session.connectedUser.lid.split(':')[0].split('@')[0] : null;
+          const isSelfChat = Boolean(
+            (myPhone && senderJid.includes(myPhone)) ||
+            (myLid && senderJid.includes(myLid))
+          );
+
+          const text = (
+            msg.message?.conversation ||
+            msg.message?.extendedTextMessage?.text ||
+            msg.message?.imageMessage?.caption ||
+            ''
+          ).trim();
+
+          console.log(`[Baileys] 📥 Message event received (Branch ${bId}):`, {
+            fromMe: msg.key.fromMe,
+            senderJid,
+            isSelfChat,
+            text: text.slice(0, 30)
+          });
 
           // If fromMe: only allow if it's a self-test chat, otherwise ignore outgoing messages
           if (msg.key.fromMe) {
             if (!isSelfChat) continue;
 
-            const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
             // Prevent infinite loop if this text was sent by bot itself
             if (session.lastBotReply && (session.lastBotReply === text || session.lastBotReply.includes(text.slice(0, 30)))) {
               continue;
@@ -484,11 +502,10 @@ class BaileysService {
 
       console.log(`[Baileys] 📩 Received WhatsApp message from ${cleanPhone || senderJid}: "${text}"`);
 
-      // Determine reply target JID
-      let replyJid = senderJid;
-      if (!senderJid.endsWith('@lid') && cleanPhone) {
-        replyJid = `${cleanPhone}@s.whatsapp.net`;
-      }
+      // Determine reply target JID (strip device suffix for standard delivery)
+      const [jidUser, jidServer] = senderJid.split('@');
+      const cleanUser = (jidUser || '').split(':')[0].replace(/[^0-9]/g, '');
+      const replyJid = (cleanUser && jidServer) ? `${cleanUser}@${jidServer}` : senderJid;
 
       const branchManager = require('../../config/branchManager');
       const { branchStorage } = require('../../middleware/branchContext');

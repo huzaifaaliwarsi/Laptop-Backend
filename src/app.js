@@ -129,11 +129,14 @@ app.get('/api/health', (req, res) => {
 app.use(errorHandler);
 
 // Automatically restore WhatsApp connection in background if a saved session exists
-try {
-  const baileys = require('./modules/whatsapp/baileys.service');
-  baileys.initWhatsAppIfSessionExists().catch(e => {
-    console.warn('[Baileys] Auto-init on app boot:', e.message);
-  });
-} catch (_) {}
+// On Vercel serverless, disable background auto-connect to prevent socket hijacking
+if (!process.env.VERCEL) {
+  try {
+    const baileys = require('./modules/whatsapp/baileys.service');
+    baileys.initWhatsAppIfSessionExists().catch(e => {
+      console.warn('[Baileys] Auto-init on app boot:', e.message);
+    });
+  } catch (_) {}
+}
 
 module.exports = app;
