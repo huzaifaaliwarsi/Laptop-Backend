@@ -10,10 +10,11 @@ WhatsApp socket or run startup recovery. Connecting from that environment now
 returns an explanatory status instead of creating another temporary session.
 
 Use one backend instance for the API and WhatsApp integration. PostgreSQL
-advisory locks prevent two instances from opening the same branch's session,
+ownership leases prevent two instances from opening the same branch's session,
 but this does not implement cross-instance message dispatch or shared status.
-Use direct PostgreSQL connections or session pooling; transaction pooling is
-not compatible with session advisory locks. Each active branch holds one
+Direct PostgreSQL, session pooling and transaction pooling are supported.
+Leases renew every 15 seconds and expire after 60 seconds following a crash.
+Key writes verify lease ownership inside the same transaction. Each active branch holds one
 dedicated database connection. Keep deployment database configuration stable.
 
 Credentials and ALL Signal keys are stored in the branch database in

@@ -8,16 +8,31 @@ const path = require('node:path');
 
 // Exercise persistence through the actual adapter, without touching customer DBs.
 function database() {
-  let rows = new Map(), locked = false, snapshot;
+  const calls = [];
+  let rows = new Map(), leases = new Map(), snapshot;
   const query = async (sql, values = []) => {
+    calls.push(sql);
     const [branch, key, value] = values;
     if (sql.startsWith('CREATE')) return { rows: [] };
+    if (sql.includes('whatsapp_auth_leases')) {
+      if (sql.startsWith('INSERT')) {
+        if (leases.has(branch)) return { rows: [] };
+        leases.set(branch, key); return { rows: [{ owner: key }] };
+      }
+      if (sql.startsWith('UPDATE')) return { rows: leases.get(branch) === key ? [{ owner: key }] : [] };
+      if (sql.startsWith('DELETE')) { if (leases.get(branch) === key) leases.delete(branch); return {}; }
+      if (sql.startsWith('SELECT')) return { rows: leases.has(branch) ? [{ seconds: 12 }] : [] };
+    }
     if (sql === 'BEGIN') { snapshot = new Map(rows); return {}; }
     if (sql === 'COMMIT') { snapshot = null; return {}; }
     if (sql === 'ROLLBACK') { rows = snapshot; snapshot = null; return {}; }
-    if (sql.startsWith('INSERT')) { rows.set(`${branch}:${key}`, { key, value }); return {}; }
+    if (sql.startsWith('INSERT')) {
+      if (Array.isArray(key)) key.forEach((item, index) => rows.set(`${branch}:${item}`, { key: item, value: value[index] }));
+      else rows.set(`${branch}:${key}`, { key, value });
+      return {};
+    }
     if (sql.startsWith('DELETE')) {
-      for (const k of rows.keys()) if (k.startsWith(`${branch}:`) && (key === undefined || k === `${branch}:${key}`)) rows.delete(k);
+      for (const k of rows.keys()) if (k.startsWith(`${branch}:`) && (key === undefined || (Array.isArray(key) ? key.some(item => k === `${branch}:${item}`) : k === `${branch}:${key}`))) rows.delete(k);
       return {};
     }
     if (sql.startsWith('SELECT')) return { rows: [...rows.entries()].filter(([k, row]) =>
@@ -25,13 +40,10 @@ function database() {
       (!Array.isArray(key) || key.includes(row.key))).map(([, row]) => row) };
     throw Error(sql);
   };
-  return { query, connect: async () => {
-    const client = new EventEmitter(); let owner = false;
-    client.query = async (sql, values) => {
-      if (sql.includes('pg_try_advisory_lock')) { owner = !locked; if (owner) locked = true; return { rows: [{ acquired: owner }] }; }
-      return query(sql, values);
-    };
-    client.release = () => { if (owner) locked = false; };
+  return { query, calls, connect: async () => {
+    const client = new EventEmitter();
+    client.query = query;
+    client.release = () => {};
     return client;
   } };
 }
@@ -69,7 +81,21 @@ test('credentials and Signal keys survive store restart, deletes persist, and lo
 test('second process cannot own the same session; ownership transfers after close', async () => {
   const pool = database(), dir = path.join(os.tmpdir(), 'nonexistent-wa-auth-dir');
   const first = await openAuthStore(pool, 1, dir, baileys, () => {});
-  await assert.rejects(openAuthStore(pool, 1, dir, baileys, () => {}), { code: 'WA_SESSION_BUSY' });
+  await assert.rejects(openAuthStore(pool, 1, dir, baileys, () => {}), { code: 'WA_SESSION_BUSY', retryAfterMs: 12000 });
   await first.close();
   const second = await openAuthStore(pool, 1, dir, baileys, () => {}); await second.close();
+});
+
+test('812 initial pairing keys use one batch write and no per-key database reads', async () => {
+  const pool = database();
+  const store = await openAuthStore(pool, 1, path.join(os.tmpdir(), 'nonexistent-wa-auth-dir'), baileys, () => {});
+  pool.calls.length = 0;
+  const keys = Object.fromEntries(Array.from({ length: 812 }, (_, id) => [String(id), { public: Buffer.from([id % 256]) }]));
+  await store.state.keys.set({ 'pre-key': keys });
+  assert.equal(pool.calls.filter(sql => sql.startsWith('INSERT INTO whatsapp_auth_state')).length, 1);
+  const beforeReads = pool.calls.length;
+  const restored = await store.state.keys.get('pre-key', Object.keys(keys));
+  assert.equal(Object.keys(restored).length, 812);
+  assert.equal(pool.calls.length, beforeReads);
+  await store.close();
 });

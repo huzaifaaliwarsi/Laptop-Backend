@@ -26,15 +26,26 @@ async function getBaileys() {
   return baileysModule;
 }
 
-// Cached WhatsApp Web Version to avoid repeated slow network lookups on every connect
-let cachedWaVersion = [2, 3000, 1051451487];
-(async () => {
-  try {
-    const b = await getBaileys();
-    const vData = await (b.fetchLatestWaWebVersion ? b.fetchLatestWaWebVersion() : b.fetchLatestBaileysVersion());
-    if (vData && vData.version) cachedWaVersion = vData.version;
-  } catch (_) {}
-})();
+// Do not race the first socket against a background version fetch. An old
+// protocol version can close with 428 before WhatsApp ever emits a QR.
+let versionRequest = null;
+let versionExpiresAt = 0;
+async function getWhatsAppVersion() {
+  if (!versionRequest || Date.now() >= versionExpiresAt) {
+    versionExpiresAt = Date.now() + 15 * 60 * 1000;
+    versionRequest = (async () => {
+      const b = await getBaileys();
+      const result = await (b.fetchLatestWaWebVersion
+        ? b.fetchLatestWaWebVersion({ signal: AbortSignal.timeout(10000) })
+        : b.fetchLatestBaileysVersion({ signal: AbortSignal.timeout(10000) }));
+      if (!result?.version || result.error || result.isLatest === false) {
+        throw new Error('Could not obtain the current WhatsApp Web version');
+      }
+      return result.version;
+    })().catch(error => { versionRequest = null; throw error; });
+  }
+  return versionRequest;
+}
 
 function getAuthDir(branchId = 1) {
   const bId = parseInt(branchId, 10) || 1;
@@ -65,6 +76,8 @@ class BranchSession {
     this.reconnectTimer = null;
     this.generation = 0;
     this.auth = null;
+    this.reuseAuth = false;
+    this.updatedAt = Date.now();
     this.retryCount = 0;
     this.stopped = false;
     this.requiresRelink = false;
@@ -193,6 +206,8 @@ class BaileysService {
         return;
       }
       const baileys = await getBaileys();
+      const version = await getWhatsAppVersion();
+      if (!current()) return;
       const makeWASocket = baileys.default?.default || baileys.default || baileys.makeWASocket;
       const {
         DisconnectReason,
@@ -202,8 +217,9 @@ class BaileysService {
 
       const branchManager = require('../../config/branchManager');
       const pool = await branchManager.getBranchPool(bId);
-      const auth = await authStore.openAuthStore(pool, bId, authDir, baileys, error => {
-        if (!current()) return;
+      let auth = session.reuseAuth ? session.auth : null;
+      if (!auth) auth = await authStore.openAuthStore(pool, bId, authDir, baileys, error => {
+        if (session.stopped || session.auth !== auth) return;
         session.lastError = 'Session storage unavailable; retrying safely.';
         console.error(`[Baileys] Branch ${bId} auth storage failure:`, error.message);
         this.retireSocket(session);
@@ -211,12 +227,11 @@ class BaileysService {
       });
       if (!current()) { await auth.close(); return; }
       session.auth = auth;
+      session.reuseAuth = false;
       const { state, saveCreds } = auth;
       session.connectedUser = state.creds.me || null;
       await saveCreds();
       if (!current()) return;
-
-      const version = cachedWaVersion || [2, 3000, 1051451487];
 
       session.sock = makeWASocket({
         version,
@@ -286,6 +301,7 @@ class BaileysService {
           session.isLinking = false;
           session.qrCodeDataUrl = null;
           session.connectedUser = session.sock.user;
+          this.emitStatus(bId);
           console.log(`[Baileys] ✅ WhatsApp Multi-Device connection established for Branch ${bId}:`, session.sock.user);
 
           const phone = session.sock.user?.id ? session.sock.user.id.split(':')[0].split('@')[0] : '';
@@ -307,14 +323,25 @@ class BaileysService {
         if (connection === 'close') {
           const code = lastDisconnect?.error?.output?.statusCode;
           const registered = Boolean(state.creds.registered || state.creds.me?.id);
+          const hadQr = Boolean(session.qrCodeDataUrl);
           const restart = code === DisconnectReason.restartRequired;
           console.log(`[Baileys] Branch ${bId} connection closed (Code: ${code})`);
+          if (code === 428) { versionRequest = null; versionExpiresAt = 0; }
           // Retire first: late events from this socket must never affect its replacement.
           this.retireSocket(session);
           const closingGeneration = session.generation;
           session.isConnecting = true;
+          session.isLinking = restart;
+          this.emitStatus(bId);
           await auth.flush();
           if (closingGeneration !== session.generation) return;
+          if (restart) {
+            // Pairing needs a fresh socket, not a fresh database lease.
+            session.reuseAuth = true;
+            session.isConnecting = false;
+            this.scheduleReconnect(bId, 0);
+            return;
+          }
           try {
           if (code === DisconnectReason.loggedOut) {
             // WhatsApp revoked these credentials. Do not retry invalid credentials.
@@ -338,7 +365,11 @@ class BaileysService {
           if (session.auth === auth) session.auth = null;
           session.isConnecting = false;
           session.isLinking = restart;
-          if (!session.stopped && (registered || restart)) this.scheduleReconnect(bId, restart ? 300 : undefined);
+          if (!session.stopped && (registered || restart || (!hadQr && session.retryCount < 4))) {
+            this.scheduleReconnect(bId, restart ? 300 : undefined);
+          } else if (!session.stopped && !hadQr) {
+            session.lastError = 'WhatsApp could not generate a QR. Check the backend connection and try Generate QR Code again.';
+          }
           this.emitStatus(bId);
         }
       };
@@ -376,10 +407,10 @@ class BaileysService {
       this.retireSocket(session);
       if (session.auth) { await session.auth.close(); session.auth = null; }
       session.lastError = error.code === 'WA_SESSION_BUSY'
-        ? 'Session is active on another server. Use the dedicated WhatsApp backend.'
+        ? `Waiting for the previous WhatsApp connection to release its lock. Retrying in ${Math.ceil((error.retryAfterMs || 5000) / 1000)} seconds.`
         : 'Connection interrupted. Retrying with saved credentials.';
       console.error(`[Baileys] Branch ${bId} initialization failed:`, error.message);
-      this.scheduleReconnect(bId);
+      this.scheduleReconnect(bId, error.code === 'WA_SESSION_BUSY' ? (error.retryAfterMs || 5000) + 250 : undefined);
     }
   }
 
@@ -406,7 +437,7 @@ class BaileysService {
     session.reconnectTimer = setTimeout(async () => {
       session.reconnectTimer = null;
       if (session.stopped || generation !== session.generation) return;
-      if (session.auth) { await session.auth.close(); session.auth = null; }
+      if (session.auth && !session.reuseAuth) { await session.auth.close(); session.auth = null; }
       if (session.stopped || generation !== session.generation) return;
       session.isConnecting = false;
       await this.initWhatsApp(branchId);
@@ -651,6 +682,7 @@ class BaileysService {
     const phone = session.connectedUser?.id ? session.connectedUser.id.split(':')[0].split('@')[0] : null;
     return {
       branchId: session.branchId,
+      updatedAt: session.updatedAt,
       connected: session.isConnected,
       connecting: session.isConnecting,
       linking: Boolean(session.isLinking),
@@ -666,6 +698,8 @@ class BaileysService {
 
   emitStatus(branchId = 1) {
     const bId = parseInt(branchId, 10) || 1;
+    const session = this.getSession(bId);
+    session.updatedAt = Math.max(Date.now(), session.updatedAt + 1);
     const status = this.getStatus(bId);
     try {
       const { getIO } = require('../../config/socket');
@@ -689,6 +723,7 @@ class BaileysService {
     if (session.isLinking) return this.getStatus(bId);
 
     if (!session.sock && !session.isConnecting) {
+      session.retryCount = 0;
       await this.initWhatsApp(bId, false);
     }
     if (session.qrCodeDataUrl) return this.getStatus(bId);
