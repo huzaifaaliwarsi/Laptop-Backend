@@ -128,4 +128,12 @@ app.get('/api/health', (req, res) => {
 // Centralized error handler
 app.use(errorHandler);
 
+// Automatically restore WhatsApp connection in background if a saved session exists
+try {
+  const baileys = require('./modules/whatsapp/baileys.service');
+  baileys.initWhatsAppIfSessionExists().catch(e => {
+    console.warn('[Baileys] Auto-init on app boot:', e.message);
+  });
+} catch (_) {}
+
 module.exports = app;

@@ -583,10 +583,38 @@ class BaileysService {
     }
   }
 
+  async ensureConnected(branchId = 1, timeoutMs = 12000) {
+    const bId = parseInt(branchId, 10) || 1;
+    const session = this.getSession(bId);
+    if (session.sock && session.isConnected) return true;
+
+    // Check if branch has saved credentials in PostgreSQL
+    const hasSaved = await this.hasSavedSession(bId);
+    if (!hasSaved) return false;
+
+    // Trigger connection if idle
+    if (!session.sock && !session.isConnecting) {
+      this.initWhatsApp(bId, false).catch(err => {
+        console.warn(`[Baileys] Auto-connect for Branch ${bId} failed:`, err.message);
+      });
+    }
+
+    // Wait up to timeoutMs for connection to become open
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (session.sock && session.isConnected) return true;
+      if (session.stopped || session.requiresRelink) return false;
+      await new Promise(r => setTimeout(r, 250));
+    }
+
+    return Boolean(session.sock && session.isConnected);
+  }
+
   async sendRawMessage(jid, text, branchId = 1) {
+    await this.ensureConnected(branchId);
     const session = this.getSession(branchId);
     if (!session.sock || !session.isConnected) {
-      throw new Error(`WhatsApp is not connected for Branch ${branchId}. Please scan the QR code first.`);
+      throw new Error(`WhatsApp is connecting or not paired for Branch ${branchId}. Please ensure the device is linked in WhatsApp Settings.`);
     }
 
     let targetJid = jid;
@@ -621,6 +649,7 @@ class BaileysService {
       } catch (e) {}
     }
 
+    await this.ensureConnected(branchId);
     const session = this.getSession(branchId);
     if (!session.sock || !session.isConnected) {
       throw new Error(`WhatsApp is not connected for Branch ${branchId}. Please scan QR code in Branch ${branchId} settings first.`);
@@ -663,6 +692,7 @@ class BaileysService {
       } catch (e) {}
     }
 
+    await this.ensureConnected(branchId);
     const session = this.getSession(branchId);
     if (!session.sock || !session.isConnected) {
       throw new Error(`WhatsApp is not connected for Branch ${branchId}. Please scan QR code first.`);
