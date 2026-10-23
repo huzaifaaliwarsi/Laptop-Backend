@@ -175,21 +175,27 @@ class BaileysService {
     }
   }
 
-  initWhatsApp(branchId = 1) {
+  initWhatsApp(branchId = 1, forceNew = false, forceAcquire = false) {
     const session = this.getSession(branchId);
+    if (forceNew) {
+      if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
+      session.reconnectTimer = null;
+      if (session.sock) this.retireSocket(session);
+      session.isConnecting = false;
+    }
     if (session.initializing) return session.initializing;
-    session.initializing = this.initializeSocket(branchId).finally(() => { session.initializing = null; });
+    session.initializing = this.initializeSocket(branchId, forceAcquire || forceNew).finally(() => { session.initializing = null; });
     return session.initializing;
   }
 
   async isCurrentBranchConnected() { return this.isConnected; }
 
-  async initializeSocket(branchId = 1) {
+  async initializeSocket(branchId = 1, force = false) {
     const bId = parseInt(branchId, 10) || 1;
     const session = this.getSession(bId);
 
-    // Connect is idempotent and NEVER erases authentication.
-    if (session.sock || session.isConnecting) return;
+    // If not forcing, connect is idempotent and NEVER erases authentication.
+    if (!force && (session.sock || session.isConnecting)) return;
     if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
     session.reconnectTimer = null;
     session.stopped = false;
@@ -201,12 +207,6 @@ class BaileysService {
 
     const authDir = getAuthDir(bId);
     try {
-      if ((process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) && process.env.WHATSAPP_WORKER !== '1') {
-        session.isConnecting = false;
-        session.lastError = 'WhatsApp is handled by the Vercel whatsapp daemon.';
-        this.emitStatus(bId);
-        return;
-      }
       const baileys = await getBaileys();
       const version = await getWhatsAppVersion();
       if (!current()) return;
@@ -226,7 +226,7 @@ class BaileysService {
         console.error(`[Baileys] Branch ${bId} auth storage failure:`, error.message);
         this.retireSocket(session);
         this.scheduleReconnect(bId);
-      });
+      }, force);
       if (!current()) { await auth.close(); return; }
       session.auth = auth;
       session.reuseAuth = false;
@@ -719,15 +719,15 @@ class BaileysService {
     emitEvent('whatsapp:status', status);
   }
 
-  async waitForQrOrStatus(branchId = 1, timeoutMs = 15000) {
+  async waitForQrOrStatus(branchId = 1, timeoutMs = 15000, force = true) {
     const bId = parseInt(branchId, 10) || 1;
     const session = this.getSession(bId);
-    if (session.isConnected) return this.getStatus(bId);
-    if (session.isLinking) return this.getStatus(bId);
+    if (!force && session.isConnected) return this.getStatus(bId);
+    if (!force && session.isLinking) return this.getStatus(bId);
 
-    if (!session.sock && !session.isConnecting) {
+    if (force || (!session.sock && !session.isConnecting)) {
       session.retryCount = 0;
-      await this.initWhatsApp(bId, false);
+      await this.initWhatsApp(bId, force, force);
     }
     if (session.qrCodeDataUrl) return this.getStatus(bId);
 
@@ -792,6 +792,7 @@ class BaileysService {
     try {
       const branchManager = require('../../config/branchManager');
       const pool = await branchManager.getBranchPool(bId);
+      await authStore.releaseLease(pool, bId);
       await pool.query(`UPDATE whatsapp_settings SET connected = FALSE, is_connected = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = 1`);
     } catch (e) {}
     this.emitStatus(bId);
@@ -801,5 +802,5 @@ class BaileysService {
 }
 
 const baileysInstance = new BaileysService();
-module.exports = process.env.VERCEL && process.env.WHATSAPP_WORKER !== '1'
+module.exports = process.env.WHATSAPP_REMOTE_WORKER === '1'
   ? require('./remote.service') : baileysInstance;

@@ -22,7 +22,7 @@ async function hasSavedSession(pool, branchId) {
 
 // Ownership lives in a row, so it works through transaction-pooling proxies.
 // Each operation fences the owner inside its transaction before touching keys.
-async function openAuthStore(pool, branchId, authDir, baileys, onFailure) {
+async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force = false) {
   await pool.query(schema);
   await pool.query(leaseSchema);
   const client = await pool.connect();
@@ -65,10 +65,15 @@ async function openAuthStore(pool, branchId, authDir, baileys, onFailure) {
     `INSERT INTO whatsapp_auth_state (branch_id, key, value) VALUES ($1, $2, $3)
      ON CONFLICT (branch_id, key) DO UPDATE SET value = EXCLUDED.value`, [branchId, key, value]);
   try {
-    const lock = await client.query(`INSERT INTO whatsapp_auth_leases (branch_id, owner, expires_at)
-      VALUES ($1, $2, NOW() + INTERVAL '60 seconds') ON CONFLICT (branch_id) DO UPDATE
-      SET owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at
-      WHERE whatsapp_auth_leases.expires_at <= NOW() RETURNING owner`, [branchId, owner]);
+    const lockQuery = force
+      ? `INSERT INTO whatsapp_auth_leases (branch_id, owner, expires_at)
+         VALUES ($1, $2, NOW() + INTERVAL '60 seconds') ON CONFLICT (branch_id) DO UPDATE
+         SET owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at RETURNING owner`
+      : `INSERT INTO whatsapp_auth_leases (branch_id, owner, expires_at)
+         VALUES ($1, $2, NOW() + INTERVAL '60 seconds') ON CONFLICT (branch_id) DO UPDATE
+         SET owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at
+         WHERE whatsapp_auth_leases.expires_at <= NOW() RETURNING owner`;
+    const lock = await client.query(lockQuery, [branchId, owner]);
     if (!lock.rows.length) {
       const activeLease = await client.query(`SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM (expires_at - NOW())))) AS seconds
         FROM whatsapp_auth_leases WHERE branch_id = $1`, [branchId]);
@@ -153,4 +158,10 @@ async function openAuthStore(pool, branchId, authDir, baileys, onFailure) {
   } catch (error) { await close(); throw error; }
 }
 
-module.exports = { openAuthStore, hasSavedSession };
+async function releaseLease(pool, branchId) {
+  try {
+    await pool.query('DELETE FROM whatsapp_auth_leases WHERE branch_id = $1', [branchId]);
+  } catch (_) {}
+}
+
+module.exports = { openAuthStore, hasSavedSession, releaseLease };

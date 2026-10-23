@@ -595,7 +595,7 @@ router.get('/status', async (req, res, next) => {
 router.post('/connect', async (req, res, next) => {
   try {
     const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
-    const status = await baileys.waitForQrOrStatus(branchId, 15000);
+    const status = await baileys.waitForQrOrStatus(branchId, 15000, true);
     return res.json({
       success: true,
       message: status.qr

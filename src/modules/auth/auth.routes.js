@@ -217,13 +217,25 @@ router.get('/me', async (req, res) => {
     }
 
     if (!token) {
-      return res.json({
-        success: true,
+      return res.status(401).json({
+        success: false,
+        code: 'NO_TOKEN',
+        message: 'No authorization token provided',
         data: { user: null }
       });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'retail_repair_jwt_super_secure_secret_key_2026');
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET || 'retail_repair_jwt_super_secure_secret_key_2026');
+    } catch (jwtErr) {
+      return res.status(401).json({
+        success: false,
+        code: 'TOKEN_EXPIRED',
+        message: 'Token has expired or is invalid',
+        data: { user: null }
+      });
+    }
 
     const branchManager = require('../../config/branchManager');
     const activeBranch = await branchManager.getBranchById(req.branchId || decoded.branchId || 1);
@@ -235,7 +247,12 @@ router.get('/me', async (req, res) => {
         [decoded.id]
       );
       if (saRes.rows.length === 0 || saRes.rows[0].status === 'Inactive') {
-        return res.json({ success: true, data: { user: null } });
+        return res.status(401).json({
+          success: false,
+          code: 'USER_INACTIVE',
+          message: 'Account not found or inactive',
+          data: { user: null }
+        });
       }
       return res.json({
         success: true,
@@ -256,8 +273,10 @@ router.get('/me', async (req, res) => {
     );
 
     if (userRes.rows.length === 0 || userRes.rows[0].status === 'Inactive') {
-      return res.json({
-        success: true,
+      return res.status(401).json({
+        success: false,
+        code: 'USER_INACTIVE',
+        message: 'Account not found or inactive',
         data: { user: null }
       });
     }
@@ -270,9 +289,11 @@ router.get('/me', async (req, res) => {
       }
     });
   } catch (error) {
-    return res.json({
-      success: true,
-      data: { user: null }
+    console.error('[Auth /me error]:', error.message);
+    return res.status(500).json({
+      success: false,
+      code: 'SERVER_ERROR',
+      message: 'Temporary server or database error verifying session'
     });
   }
 });
