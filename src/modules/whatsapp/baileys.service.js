@@ -384,7 +384,7 @@ class BaileysService {
           if (!msg.message) continue;
 
           const senderJid = msg.key.remoteJid;
-          if (!senderJid || senderJid.endsWith('@g.us') || senderJid.endsWith('@broadcast')) continue;
+          if (!senderJid || senderJid.endsWith('@g.us') || senderJid.endsWith('@broadcast') || senderJid.endsWith('@newsletter')) continue;
 
           // Check if user is messaging from their own phone to test (supports both Phone and LID)
           const myPhone = session.connectedUser?.id ? session.connectedUser.id.split(':')[0].split('@')[0] : null;
@@ -483,7 +483,7 @@ class BaileysService {
       if (!msg || !msg.key) return;
 
       const senderJid = msg.key.remoteJid;
-      if (!senderJid || senderJid.endsWith('@g.us') || senderJid.endsWith('@broadcast')) return; // Ignore groups/broadcasts
+      if (!senderJid || senderJid.endsWith('@g.us') || senderJid.endsWith('@broadcast') || senderJid.endsWith('@newsletter')) return; // Ignore groups/broadcasts/newsletters
 
       const rawText = msg.message?.conversation ||
                       msg.message?.extendedTextMessage?.text ||
