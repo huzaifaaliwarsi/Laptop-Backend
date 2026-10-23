@@ -49,9 +49,7 @@ async function getWhatsAppVersion() {
 
 function getAuthDir(branchId = 1) {
   const bId = parseInt(branchId, 10) || 1;
-  const base = (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME)
-    ? path.join('/tmp', 'whatsapp_auth_session')
-    : (process.env.WHATSAPP_AUTH_DIR || path.join(__dirname, '../../../.whatsapp_session'));
+  const base = process.env.WHATSAPP_AUTH_DIR || path.join(__dirname, '../../../.whatsapp_session');
   return path.join(base, `branch_${bId}`);
 }
 
@@ -147,7 +145,6 @@ class BaileysService {
   }
 
   async initWhatsAppIfSessionExists(targetBranchId = null) {
-    if (process.env.VERCEL) return;
     if (targetBranchId) {
       const bId = parseInt(targetBranchId, 10);
       if (await this.hasSavedSession(bId)) {
@@ -873,5 +870,4 @@ class BaileysService {
 }
 
 const baileysInstance = new BaileysService();
-module.exports = process.env.WHATSAPP_REMOTE_WORKER === '1'
-  ? require('./remote.service') : baileysInstance;
+module.exports = baileysInstance;

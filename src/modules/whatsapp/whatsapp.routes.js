@@ -602,10 +602,8 @@ router.get('/status', async (req, res, next) => {
             phone: settingsRow.number || status.phone,
             name: settingsRow.business_name || status.name
           };
-          // Trigger background connection if idle (persistent servers only, not Vercel)
-          if (!process.env.VERCEL) {
-            baileys.initWhatsAppIfSessionExists(branchId).catch(() => {});
-          }
+          // Trigger background connection if idle
+          baileys.initWhatsAppIfSessionExists(branchId).catch(() => {});
         }
       } catch (_) {}
     }
