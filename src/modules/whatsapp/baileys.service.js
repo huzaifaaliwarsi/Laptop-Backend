@@ -226,7 +226,7 @@ class BaileysService {
         console.error(`[Baileys] Branch ${bId} auth storage failure:`, error.message);
         this.retireSocket(session);
         this.scheduleReconnect(bId);
-      }, force);
+      }, true);
       if (!current()) { await auth.close(); return; }
       session.auth = auth;
       session.reuseAuth = false;

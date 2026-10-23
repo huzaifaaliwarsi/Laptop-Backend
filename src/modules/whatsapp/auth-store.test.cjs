@@ -80,10 +80,10 @@ test('credentials and Signal keys survive store restart, deletes persist, and lo
 });
 test('second process cannot own the same session; ownership transfers after close', async () => {
   const pool = database(), dir = path.join(os.tmpdir(), 'nonexistent-wa-auth-dir');
-  const first = await openAuthStore(pool, 1, dir, baileys, () => {});
-  await assert.rejects(openAuthStore(pool, 1, dir, baileys, () => {}), { code: 'WA_SESSION_BUSY', retryAfterMs: 12000 });
+  const first = await openAuthStore(pool, 1, dir, baileys, () => {}, false);
+  await assert.rejects(openAuthStore(pool, 1, dir, baileys, () => {}, false), { code: 'WA_SESSION_BUSY', retryAfterMs: 12000 });
   await first.close();
-  const second = await openAuthStore(pool, 1, dir, baileys, () => {}); await second.close();
+  const second = await openAuthStore(pool, 1, dir, baileys, () => {}, false); await second.close();
 });
 
 test('812 initial pairing keys use one batch write and no per-key database reads', async () => {

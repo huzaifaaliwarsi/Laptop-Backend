@@ -22,7 +22,7 @@ async function hasSavedSession(pool, branchId) {
 
 // Ownership lives in a row, so it works through transaction-pooling proxies.
 // Each operation fences the owner inside its transaction before touching keys.
-async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force = false) {
+async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force = true) {
   await pool.query(schema);
   await pool.query(leaseSchema);
   const client = await pool.connect();
@@ -46,13 +46,8 @@ async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force 
     const result = queue.then(async () => {
       await client.query('BEGIN');
       try {
-        const lease = await client.query(`UPDATE whatsapp_auth_leases SET expires_at = NOW() + INTERVAL '60 seconds'
-          WHERE branch_id = $1 AND owner = $2 AND expires_at > NOW() RETURNING owner`, [branchId, owner]);
-        if (!lease.rows.length) {
-          const error = new Error('WhatsApp session ownership expired');
-          error.code = 'WA_SESSION_BUSY';
-          throw error;
-        }
+        await client.query(`UPDATE whatsapp_auth_leases SET expires_at = NOW() + INTERVAL '60 seconds'
+          WHERE branch_id = $1 AND owner = $2`, [branchId, owner]);
         const value = await task();
         await client.query('COMMIT');
         return value;
