@@ -1,9 +1,6 @@
 -- =============================================================================
 -- RETAIL & REPAIR MANAGEMENT SYSTEM - PRODUCTION POSTGRESQL SCHEMA
 -- =============================================================================
-
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 -- 1. USERS & AUTHENTICATION
 DROP TABLE IF EXISTS audit_logs CASCADE;
 DROP TABLE IF EXISTS whatsapp_messages CASCADE;

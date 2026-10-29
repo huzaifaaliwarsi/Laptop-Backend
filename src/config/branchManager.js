@@ -3,6 +3,9 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
+require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
 const ENCRYPTION_KEY = (process.env.BRANCH_SECRET_KEY || process.env.JWT_SECRET || 'retail_repair_jwt_super_secure_secret_key_2026')
@@ -51,9 +54,9 @@ const masterPoolConfig = process.env.MASTER_DATABASE_URL || process.env.DATABASE
   : {
       host: process.env.DB_HOST || '127.0.0.1',
       port: parseInt(process.env.DB_PORT || '5432', 10),
-      database: process.env.DB_NAME || 'retail_repair_db',
-      user: process.env.DB_USER || 'postgres',
-      password: process.env.DB_PASSWORD || 'admin123',
+      database: process.env.DB_NAME || 'isywouhn_saadcomm',
+      user: process.env.DB_USER || 'isywouhn_saadcomm_user',
+      password: process.env.DB_PASSWORD || '',
       max: 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
@@ -175,9 +178,9 @@ async function initMasterDb() {
     if (branchCheck.rows.length === 0) {
       let b1Host = process.env.DB_HOST || '127.0.0.1';
       let b1Port = parseInt(process.env.DB_PORT || '5432', 10);
-      let b1Name = process.env.DB_NAME || 'retail_repair_db';
-      let b1User = process.env.DB_USER || 'postgres';
-      let b1Pass = process.env.DB_PASSWORD || 'admin123';
+      let b1Name = process.env.DB_NAME || 'isywouhn_saadcomm';
+      let b1User = process.env.DB_USER || 'isywouhn_saadcomm_user';
+      let b1Pass = process.env.DB_PASSWORD || '';
       let b1UrlEnc = null;
 
       if (process.env.DATABASE_URL) {

@@ -523,7 +523,6 @@ router.get('/branches/:id', requireSuperAdmin, async (req, res, next) => {
       console.warn(`[SuperAdmin] Could not query branch ${branchId} settings:`, poolErr.message);
     }
 
-    // Merge: business_settings configured via the Settings page takes priority for address, phone, email & branch name
     const effectiveBranch = {
       id: branch.id,
       branch_code: branch.branch_code,
@@ -558,6 +557,9 @@ router.get('/branches/:id', requireSuperAdmin, async (req, res, next) => {
 router.put('/branches/:id', requireSuperAdmin, async (req, res, next) => {
   try {
     const branchId = parseInt(req.params.id, 10);
+    if (isNaN(branchId)) {
+      return res.status(400).json({ success: false, message: 'Invalid branch ID.' });
+    }
     const { branch_name, phone, email, city, address, admin_name } = req.body;
 
     if (!branch_name) {
@@ -581,6 +583,23 @@ router.put('/branches/:id', requireSuperAdmin, async (req, res, next) => {
         success: false,
         message: 'Branch not found.'
       });
+    }
+
+    // Also sync business_settings inside the branch database if accessible
+    try {
+      const pool = await branchManager.getBranchPool(branchId, true);
+      await pool.query(`
+        UPDATE business_settings
+        SET company_name = COALESCE($1, company_name),
+            phone = COALESCE($2, phone),
+            email = COALESCE($3, email),
+            city = COALESCE($4, city),
+            address = COALESCE($5, address),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+      `, [branch_name, phone, email, city, address]);
+    } catch (syncErr) {
+      console.warn(`[SuperAdmin] Note: Could not sync business_settings for branch ${branchId}:`, syncErr.message);
     }
 
     // Log to Master Audit Logs

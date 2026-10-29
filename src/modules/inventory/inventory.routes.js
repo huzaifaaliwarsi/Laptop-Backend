@@ -134,7 +134,6 @@ router.get('/export-csv', requireSalesOrAdmin, async (req, res, next) => {
 
     const csvContent = '\uFEFF' + rows.join('\r\n');
     const dateStr = new Date().toISOString().slice(0, 10);
-
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="inventory-export-${dateStr}.csv"`);
     return res.send(csvContent);
@@ -359,7 +358,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           InvoiceWhatsAppService.sendInvoiceWhatsApp(invRes.rows[0].id).catch(e => {
             console.error('[inventory.routes] WhatsApp invoice auto-send error:', e.message);
           });
-        } catch (waErr) {}
+        } catch (waErr) { }
       }
 
       return productResult;
@@ -730,7 +729,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             InvoiceWhatsAppService.sendInvoiceWhatsApp(invRes.rows[0].id).catch(e => {
               console.error('[inventory.routes] WhatsApp invoice auto-send error:', e.message);
             });
-          } catch (waErr) {}
+          } catch (waErr) { }
         }
       }
 
@@ -894,12 +893,13 @@ function parseCsvText(text) {
     return result;
   }
 
-  const rawHeaders = splitCsvLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const originalHeaders = splitCsvLine(lines[0]);
+  const rawHeaders = originalHeaders.map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
   const headerMap = {
     category: ['category', 'categoryname', 'cat'],
     brand: ['brand', 'make'],
-    model: ['model', 'modelname', 'productname'],
-    specifications: ['specifications', 'specs', 'specification', 'details', 'description'],
+    model: ['model', 'modelname', 'productname', 'name', 'itemname'],
+    specifications: ['specifications', 'specs', 'specification', 'details'],
     condition: ['condition', 'state'],
     quantity: ['quantity', 'qty', 'stock', 'initialstock', 'count'],
     costPrice: ['costprice', 'cost', 'purchaseprice', 'buyprice'],
@@ -908,10 +908,22 @@ function parseCsvText(text) {
   };
 
   const resolvedIndices = {};
+  const standardIndices = new Set();
   for (const [field, aliases] of Object.entries(headerMap)) {
     const idx = rawHeaders.findIndex(h => aliases.includes(h));
-    if (idx !== -1) resolvedIndices[field] = idx;
+    if (idx !== -1) {
+      resolvedIndices[field] = idx;
+      standardIndices.add(idx);
+    }
   }
+
+  // Dynamic custom field index mapping
+  const customFieldIndices = [];
+  originalHeaders.forEach((rawH, idx) => {
+    if (!standardIndices.has(idx) && rawH.trim()) {
+      customFieldIndices.push({ name: rawH.trim(), idx });
+    }
+  });
 
   const products = [];
   for (let i = 1; i < lines.length; i++) {
@@ -923,43 +935,64 @@ function parseCsvText(text) {
       row[field] = values[idx] !== undefined ? values[idx] : '';
     }
 
-    if (!row.category && values[0]) row.category = values[0];
-    if (!row.brand && values[1]) row.brand = values[1];
-    if (!row.model && values[2]) row.model = values[2];
-    if (!row.specifications && values[3]) row.specifications = values[3];
-    if (!row.condition && values[4]) row.condition = values[4] || 'Used';
-    if (!row.quantity && values[5]) row.quantity = values[5];
-    if (!row.costPrice && values[6]) row.costPrice = values[6];
-    if (!row.expectedSalePrice && values[7]) row.expectedSalePrice = values[7];
-    if (!row.lowStockAlert && values[8]) row.lowStockAlert = values[8];
+    const customFields = {};
+    for (const cf of customFieldIndices) {
+      const val = values[cf.idx];
+      if (val !== undefined && String(val).trim() !== '') {
+        customFields[cf.name] = String(val).trim();
+      }
+    }
+
+    if (!row.category && values[0] && resolvedIndices.category === undefined) row.category = values[0];
+    if (!row.brand && values[1] && resolvedIndices.brand === undefined) row.brand = values[1];
+    if (!row.model && values[2] && resolvedIndices.model === undefined) row.model = values[2];
+    if (!row.condition) row.condition = 'Used';
 
     const qty = parseInt(row.quantity, 10);
-    if (row.category && row.brand && row.model && !isNaN(qty) && qty > 0) {
-      products.push({
-        category: row.category,
+    const cat = row.category || defaultCategory;
+    if (cat && row.brand && row.model && !isNaN(qty) && qty > 0) {
+      const item = {
+        category: cat,
+        categoryName: cat,
         brand: row.brand,
         model: row.model,
-        specifications: row.specifications || '',
         condition: row.condition || 'Used',
         quantity: qty,
         costPrice: parseFloat(row.costPrice) || 0,
         expectedSalePrice: parseFloat(row.expectedSalePrice) || 0,
-        lowStockAlert: parseInt(row.lowStockAlert, 10) || 1
+        lowStockAlert: parseInt(row.lowStockAlert, 10) || 1,
+        customFields
+      };
+
+      // Auto-map dynamic known fields to standard product columns
+      Object.entries(customFields).forEach(([fieldName, val]) => {
+        const norm = fieldName.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (['screensize', 'sizeininches', 'size'].includes(norm)) item.screenSize = val;
+        if (['processor', 'cpu'].includes(norm)) item.processor = val;
+        if (['ram', 'memory'].includes(norm)) item.ram = val;
+        if (['romssd', 'storage', 'rom', 'ssd', 'storagerom', 'romssd'].includes(norm)) item.romSsd = val;
+        if (['harddrive', 'hdd'].includes(norm)) item.hardDrive = val;
+        if (['graphicscard', 'graphics', 'gpu'].includes(norm)) item.graphicsCard = val;
+        if (['accessorycategory', 'accessorytype'].includes(norm)) item.accessoryCategory = val;
+        if (['description'].includes(norm)) item.description = val;
       });
+
+      products.push(item);
     }
   }
   return products;
 }
 
-
-
 // POST /api/products/bulk-csv - Bulk CSV import with smart auto-parsing
 router.post('/bulk-csv', requireAdmin, async (req, res, next) => {
   try {
+    const defaultCategory = req.body.categoryName || req.body.category || '';
+    const defaultCategoryId = req.body.categoryId || null;
+
     let productList = req.body.products;
     if (!Array.isArray(productList) || productList.length === 0) {
       if (req.body.csvText && typeof req.body.csvText === 'string') {
-        productList = parseCsvText(req.body.csvText);
+        productList = parseCsvText(req.body.csvText, defaultCategory);
       }
     }
 
@@ -974,7 +1007,12 @@ router.post('/bulk-csv', requireAdmin, async (req, res, next) => {
     const imported = [];
     await db.withTransaction(async (client) => {
       for (const p of productList) {
-        if (p.category && p.brand && p.model && p.quantity > 0) {
+        const cat = p.category || p.categoryName || defaultCategory;
+        if (cat && p.brand && p.model && p.quantity > 0) {
+          p.category = cat;
+          p.categoryName = cat;
+          if (!p.categoryId && defaultCategoryId) p.categoryId = defaultCategoryId;
+
           const sourceData = {
             sourceName: p.sourceName || 'CSV Bulk Import',
             invoiceNo: `CSV-${new Date().toISOString().slice(0, 10)}`,
