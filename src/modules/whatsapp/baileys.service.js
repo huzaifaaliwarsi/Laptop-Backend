@@ -39,7 +39,10 @@ async function getWhatsAppVersion() {
         ? b.fetchLatestWaWebVersion({ signal: AbortSignal.timeout(10000) })
         : b.fetchLatestBaileysVersion({ signal: AbortSignal.timeout(10000) }));
       if (!result?.version || result.error || result.isLatest === false) {
-        throw new Error('Could not obtain the current WhatsApp Web version');
+        const reason = result?.error?.cause?.code || result?.error?.code || result?.error?.message || 'Version unavailable';
+        const error = new Error(`Could not obtain the current WhatsApp Web version: ${reason}`);
+        error.code = 'WA_VERSION_UNAVAILABLE';
+        throw error;
       }
       return result.version;
     })().catch(error => { versionRequest = null; throw error; });
@@ -310,7 +313,7 @@ class BaileysService {
             const branchManager = require('../../config/branchManager');
             const pool = await branchManager.getBranchPool(bId);
             await pool.query(
-              `UPDATE whatsapp_settings SET connected = TRUE, is_connected = TRUE, number = COALESCE(NULLIF(number, ''), $1), updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
+              `UPDATE whatsapp_settings SET connected = TRUE, is_connected = TRUE, number = COALESCE(NULLIF(number, ''), $1), updated_at = CURRENT_TIMESTAMP WHERE TRUE`,
               [phone]
             );
           } catch (dbErr) {
@@ -425,7 +428,9 @@ class BaileysService {
       if (session.auth) { await session.auth.close(); session.auth = null; }
       session.lastError = error.code === 'WA_SESSION_BUSY'
         ? `Waiting for the previous WhatsApp connection to release its lock. Retrying in ${Math.ceil((error.retryAfterMs || 5000) / 1000)} seconds.`
-        : 'Connection interrupted. Retrying with saved credentials.';
+        : error.code === 'WA_VERSION_UNAVAILABLE'
+          ? 'Cannot reach WhatsApp to prepare the QR code. Check backend internet/firewall access; retrying automatically.'
+          : 'Connection interrupted. Retrying with saved credentials.';
       console.error(`[Baileys] Branch ${bId} initialization failed:`, error.message);
       this.scheduleReconnect(bId, error.code === 'WA_SESSION_BUSY' ? (error.retryAfterMs || 5000) + 250 : undefined);
     }
@@ -510,7 +515,7 @@ class BaileysService {
 
       await branchStorage.run({ branchId, pool }, async () => {
         // 1. Check whatsapp_settings
-        const sRes = await pool.query('SELECT * FROM whatsapp_settings WHERE id = 1');
+        const sRes = await pool.query('SELECT * FROM whatsapp_settings WHERE TRUE');
         const settings = sRes.rows[0] || {};
         if (settings.bot_enabled === false) {
           console.log('[Baileys] WhatsApp bot is disabled in settings. Skipping automated reply.');

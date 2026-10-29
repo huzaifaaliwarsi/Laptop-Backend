@@ -13,17 +13,19 @@ router.get('/company', (req, res, next) => {
   next();
 }, cacheRoute(300), async (req, res, next) => {
   try {
-
+    const branchId = getBranchIdFromReq(req) || 1;
     const result = await db.query(`
-      SELECT id, company_name, tagline, invoice_subtitle, phone, email, tax_number, address, invoice_footer, logo_data, ntn, strn, pos_id, fbr_pos_id, updated_at
+      SELECT id, branch_id, company_name, tagline, invoice_subtitle, phone, email, tax_number, address, invoice_footer, logo_data, ntn, strn, pos_id, fbr_pos_id, updated_at
       FROM business_settings
-      WHERE id = 1
-    `);
+      WHERE branch_id = $1
+      LIMIT 1
+    `, [branchId]);
 
     if (result.rows.length === 0) {
       return res.json({
         success: true,
         data: {
+          branch_id: branchId,
           company_name: 'Retail & Repair Management',
           tagline: 'POS, Inventory Management, Sales & Purchases',
           invoice_subtitle: 'Retail • Inventory • Repair',
@@ -57,8 +59,6 @@ router.get('/company', (req, res, next) => {
 });
 
 // PUT /api/settings/company - Update company branding (Admin only)
-// BUG FIX: Previous version had $6 used twice (tax_number AND ntn both mapped to $6),
-// causing strn, pos_id, address to all receive wrong values. Fixed with correct param mapping.
 router.put('/company', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
     const { companyName, tagline, invoiceSubtitle, phone, email, taxNumber, ntn, strn, posId, address, invoiceFooter, logoData } = req.body;
@@ -71,61 +71,85 @@ router.put('/company', authenticateToken, requireAdmin, async (req, res, next) =
       });
     }
 
-    // FIXED: Correct param ordering — previously $6 was used for both tax_number AND ntn
-    // Now: $1=companyName, $2=tagline, $3=invoiceSubtitle, $4=phone, $5=email,
-    //      $6=taxNumber, $7=ntn, $8=strn, $9=posId, $10=address, $11=invoiceFooter, $12=logoData
+    const bId = getBranchIdFromReq(req) || 1;
     const finalNtn = ntn !== undefined ? (ntn ? String(ntn).trim() : null)
-                   : (taxNumber ? String(taxNumber).trim() : null);
+      : (taxNumber ? String(taxNumber).trim() : null);
     const finalTaxNumber = taxNumber ? String(taxNumber).trim() : (ntn ? String(ntn).trim() : null);
 
-    const updateRes = await db.query(`
-      INSERT INTO business_settings (id, company_name, tagline, invoice_subtitle, phone, email, tax_number, ntn, strn, pos_id, address, invoice_footer, logo_data, updated_at)
-      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP)
-      ON CONFLICT (id) DO UPDATE SET
-        company_name = EXCLUDED.company_name,
-        tagline = EXCLUDED.tagline,
-        invoice_subtitle = EXCLUDED.invoice_subtitle,
-        phone = EXCLUDED.phone,
-        email = EXCLUDED.email,
-        tax_number = EXCLUDED.tax_number,
-        ntn = EXCLUDED.ntn,
-        strn = EXCLUDED.strn,
-        pos_id = EXCLUDED.pos_id,
-        address = EXCLUDED.address,
-        invoice_footer = EXCLUDED.invoice_footer,
-        logo_data = EXCLUDED.logo_data,
-        updated_at = CURRENT_TIMESTAMP
-      RETURNING *
-    `, [
-      companyName.trim(),
-      tagline ? tagline.trim() : null,
-      invoiceSubtitle ? invoiceSubtitle.trim() : null,
-      phone ? phone.trim() : null,
-      email ? email.trim() : null,
-      finalTaxNumber,        // $6 = tax_number
-      finalNtn,              // $7 = ntn
-      strn ? strn.trim() : null,    // $8 = strn
-      posId ? posId.trim() : null,  // $9 = pos_id
-      address ? address.trim() : null,       // $10 = address
-      invoiceFooter ? invoiceFooter.trim() : null,  // $11 = invoice_footer
-      logoData || null       // $12 = logo_data
-    ]);
+    const existing = await db.query('SELECT id FROM business_settings WHERE branch_id = $1 LIMIT 1', [bId]);
+    let updateRes;
+    if (existing.rows.length > 0) {
+      updateRes = await db.query(`
+        UPDATE business_settings SET
+          company_name = $1,
+          tagline = $2,
+          invoice_subtitle = $3,
+          phone = $4,
+          email = $5,
+          tax_number = $6,
+          ntn = $7,
+          strn = $8,
+          pos_id = $9,
+          address = $10,
+          invoice_footer = $11,
+          logo_data = COALESCE($12, logo_data),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE branch_id = $13
+        RETURNING *
+      `, [
+        companyName.trim(),
+        tagline ? tagline.trim() : null,
+        invoiceSubtitle ? invoiceSubtitle.trim() : null,
+        phone ? phone.trim() : null,
+        email ? email.trim() : null,
+        finalTaxNumber,
+        finalNtn,
+        strn ? strn.trim() : null,
+        posId ? posId.trim() : null,
+        address ? address.trim() : null,
+        invoiceFooter ? invoiceFooter.trim() : null,
+        logoData || null,
+        bId
+      ]);
+    } else {
+      updateRes = await db.query(`
+        INSERT INTO business_settings (branch_id, company_name, tagline, invoice_subtitle, phone, email, tax_number, ntn, strn, pos_id, address, invoice_footer, logo_data, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP)
+        RETURNING *
+      `, [
+        bId,
+        companyName.trim(),
+        tagline ? tagline.trim() : null,
+        invoiceSubtitle ? invoiceSubtitle.trim() : null,
+        phone ? phone.trim() : null,
+        email ? email.trim() : null,
+        finalTaxNumber,
+        finalNtn,
+        strn ? strn.trim() : null,
+        posId ? posId.trim() : null,
+        address ? address.trim() : null,
+        invoiceFooter ? invoiceFooter.trim() : null,
+        logoData || null
+      ]);
+    }
+
+
 
     // Also sync branch name and contact info to master_branches so all listings remain unified
     try {
       const branchManager = require('../../config/branchManager');
-      const bId = getBranchIdFromReq(req);
       await branchManager.masterPool.query(`
         UPDATE master_branches 
         SET branch_name = $1, phone = COALESCE($2, phone), email = COALESCE($3, email), address = COALESCE($4, address), updated_at = CURRENT_TIMESTAMP
         WHERE id = $5
-      `, [companyName.trim(), phone ? phone.trim() : null, email ? email.trim() : null, address ? address.trim() : null, bId]);
+      `, [companyName.trim(), phone || null, email || null, address || null, bId]);
     } catch (syncErr) {
-      console.warn('[Settings] Failed to sync to master_branches:', syncErr.message);
+      console.warn('[Settings] Non-critical: Could not sync branch metadata to Master DB:', syncErr.message);
     }
 
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/settings*');
-    emitEvent('settings.company_updated', updateRes.rows[0]);
+    await CacheService.invalidateBranchPattern(bId, '/api/settings*');
+    await CacheService.invalidatePattern('route:*:/api/super-admin*');
+    emitEvent('settings.updated', updateRes.rows[0]);
 
     return res.json({
       success: true,
@@ -140,7 +164,8 @@ router.put('/company', authenticateToken, requireAdmin, async (req, res, next) =
 // GET /api/settings/opening-balances (Admin only) — Cached 120s
 router.get('/opening-balances', authenticateToken, requireAdmin, cacheRoute(120), async (req, res, next) => {
   try {
-    const result = await db.query('SELECT opening_cash, opening_online FROM business_settings WHERE id = 1');
+    const bId = getBranchIdFromReq(req) || 1;
+    const result = await db.query('SELECT opening_cash, opening_online FROM business_settings WHERE branch_id = $1 LIMIT 1', [bId]);
     const cash = result.rows.length > 0 ? parseFloat(result.rows[0].opening_cash || 0) : 0;
     const online = result.rows.length > 0 ? parseFloat(result.rows[0].opening_online || 0) : 0;
 
@@ -159,22 +184,28 @@ router.get('/opening-balances', authenticateToken, requireAdmin, cacheRoute(120)
 // PUT /api/settings/opening-balances (Admin only)
 router.put('/opening-balances', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const rawCash = req.body.openingCash !== undefined ? req.body.openingCash : req.body.openingCashBalance;
     const rawOnline = req.body.openingOnline !== undefined ? req.body.openingOnline : req.body.openingOnlineBalance;
     const cash = Math.max(0, parseFloat(rawCash || 0));
     const online = Math.max(0, parseFloat(rawOnline || 0));
 
-    await db.query(`
-      INSERT INTO business_settings (id, opening_cash, opening_online, updated_at)
-      VALUES (1, $1, $2, CURRENT_TIMESTAMP)
-      ON CONFLICT (id) DO UPDATE SET
-        opening_cash = EXCLUDED.opening_cash,
-        opening_online = EXCLUDED.opening_online,
-        updated_at = CURRENT_TIMESTAMP
-    `, [cash, online]);
+    const existing = await db.query('SELECT id FROM business_settings WHERE branch_id = $1 LIMIT 1', [bId]);
+    if (existing.rows.length > 0) {
+      await db.query(`
+        UPDATE business_settings SET
+          opening_cash = $1, opening_online = $2, updated_at = CURRENT_TIMESTAMP
+        WHERE branch_id = $3
+      `, [cash, online, bId]);
+    } else {
+      await db.query(`
+        INSERT INTO business_settings (branch_id, opening_cash, opening_online, updated_at)
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      `, [bId, cash, online]);
+    }
 
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/settings*');
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
+    await CacheService.invalidateBranchPattern(bId, '/api/settings*');
+    await CacheService.invalidateBranchPattern(bId, '/api/reports*');
     emitEvent('settings.balances_updated', { openingCash: cash, openingOnline: online });
 
     return res.json({
@@ -187,58 +218,56 @@ router.put('/opening-balances', authenticateToken, requireAdmin, async (req, res
   }
 });
 
-// POST /api/settings/reset-database (Admin only) - Clear transactional & test data
+// POST /api/settings/reset-database (Admin only) - Clear transactional & test data for this branch
 router.post('/reset-database', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     await db.withTransaction(async (client) => {
-      // Invoices & Payments
-      await client.query('TRUNCATE TABLE invoice_items CASCADE');
-      await client.query('TRUNCATE TABLE invoices CASCADE');
-      await client.query('TRUNCATE TABLE payments CASCADE');
-      await client.query('TRUNCATE TABLE accounts CASCADE');
-      await client.query('TRUNCATE TABLE vendor_returns CASCADE');
-      await client.query('TRUNCATE TABLE held_bills CASCADE');
+      // Invoices & Payments for this branch
+      await client.query('DELETE FROM invoice_items WHERE invoice_id IN (SELECT id FROM invoices WHERE branch_id = $1)', [bId]);
+      await client.query('DELETE FROM invoices WHERE branch_id = $1', [bId]);
+      await client.query('DELETE FROM payments WHERE branch_id = $1', [bId]);
+      await client.query('DELETE FROM accounts WHERE branch_id = $1', [bId]);
+      await client.query('DELETE FROM vendor_returns WHERE branch_id = $1', [bId]);
+      await client.query('DELETE FROM held_bills WHERE branch_id = $1', [bId]);
 
-      // Repairs
-      await client.query('TRUNCATE TABLE repair_parts_used CASCADE');
-      await client.query('TRUNCATE TABLE repair_job_lines CASCADE');
-      await client.query('TRUNCATE TABLE repair_status_history CASCADE');
-      await client.query('TRUNCATE TABLE repair_jobs CASCADE');
+      // Repairs for this branch
+      await client.query('DELETE FROM repair_parts_used WHERE repair_job_id IN (SELECT id FROM repair_jobs WHERE branch_id = $1)', [bId]);
+      await client.query('DELETE FROM repair_job_lines WHERE repair_job_id IN (SELECT id FROM repair_jobs WHERE branch_id = $1)', [bId]);
+      await client.query('DELETE FROM repair_status_history WHERE repair_job_id IN (SELECT id FROM repair_jobs WHERE branch_id = $1)', [bId]);
+      await client.query('DELETE FROM repair_additional_work_requests WHERE repair_job_id IN (SELECT id FROM repair_jobs WHERE branch_id = $1)', [bId]);
+      await client.query('DELETE FROM repair_jobs WHERE branch_id = $1', [bId]);
 
-      // Inventory & Spare Parts
-      await client.query('TRUNCATE TABLE inventory_movements CASCADE');
-      await client.query('TRUNCATE TABLE products CASCADE');
-      await client.query('TRUNCATE TABLE repair_parts_movements CASCADE');
-      await client.query('TRUNCATE TABLE repair_parts CASCADE');
+      // Inventory & Spare Parts for this branch
+      await client.query('DELETE FROM inventory_movements WHERE branch_id = $1', [bId]);
+      await client.query('DELETE FROM products WHERE branch_id = $1', [bId]);
+      await client.query('DELETE FROM repair_parts_movements WHERE branch_id = $1', [bId]);
+      await client.query('DELETE FROM repair_parts WHERE branch_id = $1', [bId]);
 
       // Expenses & Logs
-      await client.query('TRUNCATE TABLE expenses CASCADE');
-      await client.query('TRUNCATE TABLE audit_logs CASCADE');
-
-      // WhatsApp
-      await client.query('TRUNCATE TABLE whatsapp_messages CASCADE');
-      await client.query('TRUNCATE TABLE whatsapp_conversations CASCADE');
+      await client.query('DELETE FROM expenses WHERE branch_id = $1', [bId]);
+      await client.query('DELETE FROM audit_logs WHERE branch_id = $1', [bId]);
 
       // Customers & Vendors
-      await client.query('TRUNCATE TABLE customers CASCADE');
-      await client.query('TRUNCATE TABLE vendors CASCADE');
+      await client.query('DELETE FROM customers WHERE branch_id = $1', [bId]);
+      await client.query('DELETE FROM vendors WHERE branch_id = $1', [bId]);
 
       // Reset opening cash & online
       await client.query(`
         UPDATE business_settings 
         SET opening_cash = 0.00, opening_online = 0.00 
-        WHERE id = 1
-      `);
+        WHERE branch_id = $1
+      `, [bId]);
     });
 
-    // Flush entire cache after full database reset
-    await CacheService.flush();
+    // Flush cache for this branch
+    await CacheService.invalidateBranchPattern(bId, '*');
 
-    emitEvent('database.reset', { timestamp: new Date() });
+    emitEvent('database.reset', { branchId: bId, timestamp: new Date() });
 
     return res.json({
       success: true,
-      message: 'All records, inventory, invoices, repairs, accounts and contacts have been reset to fresh empty state.'
+      message: 'Branch records, inventory, invoices, repairs, accounts and contacts have been reset to fresh empty state.'
     });
   } catch (error) {
     next(error);

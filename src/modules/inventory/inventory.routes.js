@@ -177,6 +177,7 @@ function paymentStatus(total, paid) {
 // POST /api/products - Create product (Admin only)
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
+    const branchId = getBranchIdFromReq(req) || 1;
     const category = req.body.category || req.body.categoryName;
     const { quantity } = req.body;
     if (!category || !quantity) {
@@ -198,6 +199,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     req.body.model = model;
     req.body.category = category;
     req.body.categoryName = category;
+    req.body.branchId = branchId;
 
     const qty = parseInt(quantity || 1, 10);
     const costPrice = parseFloat(req.body.costPrice || 0);
@@ -216,26 +218,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // 1. Resolve vendorId if vendorName given but no ID
       // 1. Resolve or default vendor
       if (!vendorId && vendorName && vendorName.trim() !== '' && vendorName !== 'Manual Entry') {
-        const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE LOWER(name) = LOWER($1)', [vendorName.trim()]);
+        const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE LOWER(name) = LOWER($1) AND branch_id = $2', [vendorName.trim(), branchId]);
         if (vRes.rows.length > 0) {
           vendorId = vRes.rows[0].id;
           vendorName = vRes.rows[0].name;
         } else {
           vendorId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
-          await client.query('INSERT INTO vendors (id, name, contact) VALUES ($1, $2, $3)', [
-            vendorId, vendorName.trim(), req.body.vendorContact || req.body.contact || null
+          await client.query('INSERT INTO vendors (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)', [
+            vendorId, vendorName.trim(), req.body.vendorContact || req.body.contact || null, branchId
           ]);
         }
       } else if (!vendorId && (!vendorName || vendorName.trim() === '' || vendorName === 'Manual Entry')) {
-        const vRes = await client.query(`SELECT id, name FROM vendors WHERE LOWER(name) = 'direct purchase' OR LOWER(name) = 'cash vendor' LIMIT 1`);
+        const vRes = await client.query(`SELECT id, name FROM vendors WHERE (LOWER(name) = 'direct purchase' OR LOWER(name) = 'cash vendor') AND branch_id = $1 LIMIT 1`, [branchId]);
         if (vRes.rows.length > 0) {
           vendorId = vRes.rows[0].id;
           vendorName = vRes.rows[0].name;
         } else {
           vendorId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
           vendorName = 'Cash Vendor / Direct Purchase';
-          await client.query('INSERT INTO vendors (id, name, contact) VALUES ($1, $2, $3)', [
-            vendorId, vendorName, null
+          await client.query('INSERT INTO vendors (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)', [
+            vendorId, vendorName, null, branchId
           ]);
         }
       }
@@ -246,7 +248,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
       if (totalCost > 0) {
         if (!generatedInvoiceNo || generatedInvoiceNo === 'MANUAL') {
-          generatedInvoiceNo = await getNextInvoiceNo('vendor_purchase', client);
+          generatedInvoiceNo = await getNextInvoiceNo('vendor_purchase', client, branchId);
         }
         generatedInvoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
       }
@@ -291,18 +293,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // Insert Invoice
         const invRes = await client.query(
           `INSERT INTO invoices (
-            id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
+            id, branch_id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
             product_total, service_total, total, paid, initial_paid, balance, payment_method,
             reference_id, payment_status, is_voided, created_by, created_by_name
           ) VALUES (
-            $1, $2, 'Vendor Purchase', 'vendor_purchase', $3, 'Vendor', $4, $5, $6,
+            $1, $15, $2, 'Vendor Purchase', 'vendor_purchase', $3, 'Vendor', $4, $5, $6,
             $7, 0, $7, $8, $8, $9, $10,
             $11, $12, FALSE, $13, $14
           ) RETURNING *`,
           [
             generatedInvoiceId, generatedInvoiceNo, purchaseDate, vendorId, vendorName, vendorContact,
             totalCost, paidAmount, balance, paymentMethod,
-            referenceId, pStatus, validUserId, req.user.name || 'Platform Super Admin'
+            referenceId, pStatus, validUserId, req.user.name || 'Platform Super Admin', branchId
           ]
         );
 
@@ -325,17 +327,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
           await client.query(
             `INSERT INTO payments (
-              id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+              id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
               direction, amount, date, payment_method, reference_id, notes, affects_money,
               is_initial_settlement, created_by, created_by_name
             ) VALUES (
-              $1, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
+              $1, $12, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
               'Paid', $6, $7, $8, $9, 'Inventory Add Product Vendor Payment', TRUE,
               TRUE, $10, $11
             )`,
             [
               payId, generatedInvoiceId, generatedInvoiceNo, vendorId, vendorName,
-              paidAmount, purchaseDate, paymentMethod, referenceId, validUserId, req.user.name || 'Platform Super Admin'
+              paidAmount, purchaseDate, paymentMethod, referenceId, validUserId, req.user.name || 'Platform Super Admin', branchId
             ]
           );
         }
@@ -345,10 +347,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
           await client.query(
             `INSERT INTO accounts (
-              id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+              id, branch_id, type, party_type, party_id, party_name, invoice_id, invoice_no,
               amount, remaining, status, date
-            ) VALUES ($1, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
-            [accId, vendorId, vendorName, generatedInvoiceId, generatedInvoiceNo, balance, balance, purchaseDate]
+            ) VALUES ($1, $9, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
+            [accId, vendorId, vendorName, generatedInvoiceId, generatedInvoiceNo, balance, balance, purchaseDate, branchId]
           );
         }
 
@@ -385,6 +387,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /api/products/:id - Update product & sync Vendor Ledger (Admin only)
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
+    const branchId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
     const cat = req.body.category || req.body.categoryName;
     const {
@@ -399,7 +402,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     const category = cat;
 
     const result = await db.withTransaction(async (client) => {
-      const existingRes = await client.query('SELECT * FROM products WHERE id = $1 FOR UPDATE', [id]);
+      const existingRes = await client.query('SELECT * FROM products WHERE id = $1 AND branch_id = $2 FOR UPDATE', [id, branchId]);
       if (existingRes.rows.length === 0) {
         const error = new Error('Product not found.');
         error.status = 404;
@@ -429,19 +432,19 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // 1. Resolve vendorId if vendorName given but no ID
       if (hasVendor) {
         if (vId && (!vName || vName === 'Manual Entry')) {
-          const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE id = $1', [vId]);
+          const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE id = $1 AND branch_id = $2', [vId, branchId]);
           if (vRes.rows.length > 0) {
             vName = vRes.rows[0].name;
           }
         } else if (vName && (!vId || vId === 'MANUAL')) {
-          const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE LOWER(name) = LOWER($1)', [vName.trim()]);
+          const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE LOWER(name) = LOWER($1) AND branch_id = $2', [vName.trim(), branchId]);
           if (vRes.rows.length > 0) {
             vId = vRes.rows[0].id;
             vName = vRes.rows[0].name;
           } else {
             vId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
-            await client.query('INSERT INTO vendors (id, name, contact) VALUES ($1, $2, $3)', [
-              vId, vName.trim(), req.body.vendorContact || req.body.contact || null
+            await client.query('INSERT INTO vendors (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)', [
+              vId, vName.trim(), req.body.vendorContact || req.body.contact || null, branchId
             ]);
           }
         }
@@ -481,7 +484,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           stock_in = CASE WHEN $24::integer IS NOT NULL THEN $24 ELSE stock_in END,
           custom_fields = CASE WHEN $26::jsonb IS NOT NULL THEN $26::jsonb ELSE custom_fields END,
           updated_at = CURRENT_TIMESTAMP
-         WHERE id = $25
+         WHERE id = $25 AND branch_id = $27
          RETURNING *`,
         [
           inventoryType, category, brand, model, screenSize, processor, ram, romSsd,
@@ -492,7 +495,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           invNo !== undefined ? invNo : null,
           req.body.quantity !== undefined ? effectiveQty : null,
           id,
-          req.body.customFields ? JSON.stringify(req.body.customFields) : null
+          req.body.customFields ? JSON.stringify(req.body.customFields) : null,
+          branchId
         ]
       );
 
@@ -510,7 +514,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
         let vendorContact = req.body.vendorContact || req.body.contact || null;
         if (!vendorContact && vId) {
-          const vRow = await client.query('SELECT contact FROM vendors WHERE id = $1', [vId]);
+          const vRow = await client.query('SELECT contact FROM vendors WHERE id = $1 AND branch_id = $2', [vId, branchId]);
           if (vRow.rows.length > 0) vendorContact = vRow.rows[0].contact;
         }
 
@@ -519,15 +523,15 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           `SELECT i.id, i.invoice_no 
            FROM invoices i 
            JOIN invoice_items ii ON ii.invoice_id = i.id 
-           WHERE ii.product_id = $1 AND i.type_key = 'vendor_purchase' 
+           WHERE ii.product_id = $1 AND i.type_key = 'vendor_purchase' AND i.branch_id = $2
            LIMIT 1`,
-          [id]
+          [id, branchId]
         );
 
         if (existingInvRes.rows.length === 0 && invNo && invNo !== 'MANUAL') {
           const invMatch = await client.query(
-            `SELECT id, invoice_no FROM invoices WHERE invoice_no = $1 AND type_key = 'vendor_purchase' LIMIT 1`,
-            [invNo]
+            `SELECT id, invoice_no FROM invoices WHERE invoice_no = $1 AND type_key = 'vendor_purchase' AND branch_id = $2 LIMIT 1`,
+            [invNo, branchId]
           );
           if (invMatch.rows.length > 0) {
             existingInvRes = invMatch;
@@ -548,12 +552,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
                  product_total = $4, total = $4, paid = $5, initial_paid = $5, balance = $6,
                  payment_status = $7, payment_method = $8, reference_id = $9, date = $10,
                  updated_at = CURRENT_TIMESTAMP
-             WHERE id = $11`,
+             WHERE id = $11 AND branch_id = $12`,
             [
               vId, vName, vendorContact,
               totalCost, paidAmount, balance,
               pStatus, paymentMethod, referenceId, pDate,
-              targetInvoiceId
+              targetInvoiceId, branchId
             ]
           );
 
@@ -589,7 +593,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           }
 
           // Update/Insert Payment
-          const existingPayRes = await client.query('SELECT id FROM payments WHERE invoice_id = $1 LIMIT 1', [targetInvoiceId]);
+          const existingPayRes = await client.query('SELECT id FROM payments WHERE invoice_id = $1 AND branch_id = $2 LIMIT 1', [targetInvoiceId, branchId]);
           if (paidAmount > 0) {
             const creator = getCreator(req.user);
             if (existingPayRes.rows.length > 0) {
@@ -597,61 +601,61 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
                 `UPDATE payments 
                  SET party_id = $1, party_name = $2, amount = $3, date = $4,
                      payment_method = $5, reference_id = $6
-                 WHERE id = $7`,
-                [vId, vName, paidAmount, pDate, paymentMethod, referenceId, existingPayRes.rows[0].id]
+                 WHERE id = $7 AND branch_id = $8`,
+                [vId, vName, paidAmount, pDate, paymentMethod, referenceId, existingPayRes.rows[0].id, branchId]
               );
             } else {
               const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
               await client.query(
                 `INSERT INTO payments (
-                  id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+                  id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
                   direction, amount, date, payment_method, reference_id, notes, affects_money,
                   is_initial_settlement, created_by, created_by_name
                 ) VALUES (
-                  $1, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
+                  $1, $12, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
                   'Paid', $6, $7, $8, $9, 'Inventory Product Vendor Payment', TRUE,
                   TRUE, $10, $11
                 )`,
                 [
                   payId, targetInvoiceId, targetInvoiceNo, vId, vName,
-                  paidAmount, pDate, paymentMethod, referenceId, creator.id, creator.name
+                  paidAmount, pDate, paymentMethod, referenceId, creator.id, creator.name, branchId
                 ]
               );
             }
           } else if (existingPayRes.rows.length > 0) {
-            await client.query('DELETE FROM payments WHERE id = $1', [existingPayRes.rows[0].id]);
+            await client.query('DELETE FROM payments WHERE id = $1 AND branch_id = $2', [existingPayRes.rows[0].id, branchId]);
           }
 
           // Update/Insert/Delete Accounts (Vendor Payable Ledger)
-          const existingAccRes = await client.query('SELECT id FROM accounts WHERE invoice_id = $1 LIMIT 1', [targetInvoiceId]);
+          const existingAccRes = await client.query('SELECT id FROM accounts WHERE invoice_id = $1 AND branch_id = $2 LIMIT 1', [targetInvoiceId, branchId]);
           if (balance > 0) {
             if (existingAccRes.rows.length > 0) {
               await client.query(
                 `UPDATE accounts 
                  SET party_id = $1, party_name = $2, amount = $3, remaining = $3, status = 'Open', date = $4
-                 WHERE id = $5`,
-                [vId, vName, balance, pDate, existingAccRes.rows[0].id]
+                 WHERE id = $5 AND branch_id = $6`,
+                [vId, vName, balance, pDate, existingAccRes.rows[0].id, branchId]
               );
             } else {
               const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
               await client.query(
                 `INSERT INTO accounts (
-                  id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+                  id, branch_id, type, party_type, party_id, party_name, invoice_id, invoice_no,
                   amount, remaining, status, date
-                ) VALUES ($1, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
-                [accId, vId, vName, targetInvoiceId, targetInvoiceNo, balance, balance, pDate]
+                ) VALUES ($1, $9, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
+                [accId, vId, vName, targetInvoiceId, targetInvoiceNo, balance, balance, pDate, branchId]
               );
             }
           } else if (existingAccRes.rows.length > 0) {
-            await client.query('DELETE FROM accounts WHERE id = $1', [existingAccRes.rows[0].id]);
+            await client.query('DELETE FROM accounts WHERE id = $1 AND branch_id = $2', [existingAccRes.rows[0].id, branchId]);
           }
         } else {
           // CREATE New Vendor Purchase Invoice & Ledger
-          let candidateInvNo = invNo && invNo !== 'MANUAL' ? invNo : await getNextInvoiceNo('vendor_purchase', client);
-          // Check if candidateInvNo exists in invoices
-          const invExistsCheck = await client.query('SELECT 1 FROM invoices WHERE invoice_no = $1', [candidateInvNo]);
+          let candidateInvNo = invNo && invNo !== 'MANUAL' ? invNo : await getNextInvoiceNo('vendor_purchase', client, branchId);
+          // Check if candidateInvNo exists in invoices for this branch
+          const invExistsCheck = await client.query('SELECT 1 FROM invoices WHERE invoice_no = $1 AND branch_id = $2', [candidateInvNo, branchId]);
           if (invExistsCheck.rows.length > 0) {
-            candidateInvNo = await getNextInvoiceNo('vendor_purchase', client);
+            candidateInvNo = await getNextInvoiceNo('vendor_purchase', client, branchId);
           }
 
           targetInvoiceNo = candidateInvNo;
@@ -660,18 +664,18 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
           const invRes = await client.query(
             `INSERT INTO invoices (
-              id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
+              id, branch_id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
               product_total, service_total, total, paid, initial_paid, balance, payment_method,
               reference_id, payment_status, is_voided, created_by, created_by_name
             ) VALUES (
-              $1, $2, 'Vendor Purchase', 'vendor_purchase', $3, 'Vendor', $4, $5, $6,
+              $1, $15, $2, 'Vendor Purchase', 'vendor_purchase', $3, 'Vendor', $4, $5, $6,
               $7, 0, $7, $8, $8, $9, $10,
               $11, $12, FALSE, $13, $14
             ) RETURNING *`,
             [
               targetInvoiceId, targetInvoiceNo, pDate, vId, vName, vendorContact,
               totalCost, paidAmount, balance, paymentMethod,
-              referenceId, pStatus, creator.id, creator.name
+              referenceId, pStatus, creator.id, creator.name, branchId
             ]
           );
 
@@ -692,17 +696,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
             await client.query(
               `INSERT INTO payments (
-                id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+                id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
                 direction, amount, date, payment_method, reference_id, notes, affects_money,
                 is_initial_settlement, created_by, created_by_name
               ) VALUES (
-                $1, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
+                $1, $12, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
                 'Paid', $6, $7, $8, $9, 'Inventory Product Vendor Payment', TRUE,
                 TRUE, $10, $11
               )`,
               [
                 payId, targetInvoiceId, targetInvoiceNo, vId, vName,
-                paidAmount, pDate, paymentMethod, referenceId, creator.id, creator.name
+                paidAmount, pDate, paymentMethod, referenceId, creator.id, creator.name, branchId
               ]
             );
           }
@@ -711,16 +715,16 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
             await client.query(
               `INSERT INTO accounts (
-                id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+                id, branch_id, type, party_type, party_id, party_name, invoice_id, invoice_no,
                 amount, remaining, status, date
-              ) VALUES ($1, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
-              [accId, vId, vName, targetInvoiceId, targetInvoiceNo, balance, balance, pDate]
+              ) VALUES ($1, $9, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
+              [accId, vId, vName, targetInvoiceId, targetInvoiceNo, balance, balance, pDate, branchId]
             );
           }
 
           await client.query(
-            `UPDATE products SET purchase_invoice_no = $1, source_id = $2, source_name = $3 WHERE id = $4`,
-            [targetInvoiceNo, vId, vName, id]
+            `UPDATE products SET purchase_invoice_no = $1, source_id = $2, source_name = $3 WHERE id = $4 AND branch_id = $5`,
+            [targetInvoiceNo, vId, vName, id, branchId]
           );
 
           emitEvent('invoice.created', invRes.rows[0]);
@@ -1059,14 +1063,14 @@ router.delete('/:id', requireSalesOrAdmin, async (req, res, next) => {
 
     await db.withTransaction(async (client) => {
       // 1. Delete associated inventory movement logs
-      await client.query('DELETE FROM inventory_movements WHERE product_id = $1', [id]);
+      await client.query('DELETE FROM inventory_movements WHERE product_id = $1 AND branch_id = $2', [id, branchId]);
 
       // 2. Clear product reference in invoice_items and repair_parts_used
       await client.query('UPDATE invoice_items SET product_id = NULL WHERE product_id = $1', [id]);
       await client.query('UPDATE repair_parts_used SET product_id = NULL WHERE product_id = $1', [id]);
 
       // 3. Delete the product
-      await client.query('DELETE FROM products WHERE id = $1', [id]);
+      await client.query('DELETE FROM products WHERE id = $1 AND branch_id = $2', [id, branchId]);
     });
 
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');

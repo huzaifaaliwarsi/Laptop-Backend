@@ -67,7 +67,7 @@ class InvoiceWhatsAppService {
       // If triggered automatically on invoice creation, verify setting is enabled
       if (!options.isManual) {
         try {
-          const sRes = await db.query('SELECT auto_invoice_whatsapp FROM whatsapp_settings WHERE id = 1');
+          const sRes = await db.query('SELECT auto_invoice_whatsapp FROM whatsapp_settings WHERE TRUE');
           if (sRes.rows.length > 0 && sRes.rows[0].auto_invoice_whatsapp === false) {
             console.log('[InvoiceWhatsApp] Auto invoice WhatsApp notifications disabled in settings. Skipping.');
             return { success: false, reason: 'auto_disabled_in_settings' };

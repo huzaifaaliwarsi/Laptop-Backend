@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const { EventEmitter } = require('node:events');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture(versionGate = null) {
+function fixture(versionGate = null, versionResult = null) {
   const sockets = [], timers = new Map();
   let deleted = 0, closed = 0, opened = 0, saved = 0;
   const creds = { registered: true, me: { id: '923001234567:1@s.whatsapp.net' } };
@@ -20,7 +20,7 @@ function fixture(versionGate = null) {
     },
     DisconnectReason: { loggedOut: 401, restartRequired: 515, connectionReplaced: 440, badSession: 500, forbidden: 403, multideviceMismatch: 411 },
     makeCacheableSignalKeyStore: keys => keys, Browsers: { windows: () => [] },
-    fetchLatestWaWebVersion: async () => { if (versionGate) await versionGate; return { version: [2, 3000, 1], isLatest: true }; }
+    fetchLatestWaWebVersion: async () => { if (versionGate) await versionGate; return versionResult || { version: [2, 3000, 1], isLatest: true }; }
   };
   const manager = { getBranchPool: async () => ({ query: async () => ({ rows: [] }) }), listBranches: async () => [{ id: 1 }] };
   const requires = {
@@ -41,6 +41,21 @@ function fixture(versionGate = null) {
     async update(update) { sockets.at(-1).ev.emit('connection.update', update); await tick(); },
     async retry() { const [id, fn] = timers.entries().next().value; timers.delete(id); await fn(); await tick(); } };
 }
+
+test('blocked version fetch reports backend access failure and retries without touching credentials', async () => {
+  const result = { version: [2, 3000, 1], isLatest: false, error: { message: 'fetch failed', cause: { code: 'EACCES' } } };
+  const f = fixture(null, result);
+  await f.service.initWhatsApp(1);
+  assert.match(f.service.getStatus(1).error, /backend internet\/firewall/);
+  assert.equal(f.sockets.length, 0);
+  assert.equal(f.counts().opened, 0);
+  assert.equal(f.counts().deleted, 0);
+  assert.equal(f.timers.size, 1);
+  result.isLatest = true; delete result.error;
+  await f.retry(); await f.update({ qr: 'live-qr' });
+  assert.equal(f.service.getStatus(1).qr, 'data:qr');
+  assert.equal(f.service.getStatus(1).error, null);
+});
 
 test('parallel connect requests create one socket without clearing credentials', async () => {
   const f = fixture(); await Promise.all([f.service.initWhatsApp(1), f.service.initWhatsApp(1, true)]);

@@ -9,7 +9,7 @@ const { getCreator } = require('../../utils/userHelper');
 const { emitEvent } = require('../../config/socket');
 const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 // GET /api/invoices/:id/pdf - Stream official PDF invoice document (Direct access for PDF preview & download)
-router.get('/:id/pdf', async (req, res, next) => {
+router.get('/:id/pdf', authenticateToken, async (req, res, next) => {
   try {
     const invoice = await InvoiceService.getInvoiceById(req.params.id);
     if (!invoice) {
@@ -38,8 +38,10 @@ router.use(authenticateToken);
 router.get('/', cacheRoute(60), async (req, res, next) => {
   try {
     const { search, type, status, from, to, page, limit } = req.query;
+    const branchId = getBranchIdFromReq(req) || 1;
     let queryText = 'SELECT * FROM invoices WHERE 1=1';
-    const params = [];
+    const params = [branchId];
+    queryText += ' AND branch_id = $1';
 
     // Role scoping: Sales staff only see their own invoices
     if (req.user.role === 'sales') {

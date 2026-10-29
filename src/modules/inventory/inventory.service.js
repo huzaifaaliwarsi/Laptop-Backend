@@ -49,7 +49,11 @@ class InventoryService {
       FROM products p
       WHERE 1=1
     `;
-    const params = [];
+    const branchContext = require('../../middleware/branchContext');
+    const branchStore = branchContext.getBranchStore();
+    const bId = filters.branchId || branchStore?.branchId || 1;
+    const params = [bId];
+    queryText += ' AND p.branch_id = $1';
 
     if (search && String(search).trim() !== '') {
       params.push(`%${search.trim().toLowerCase()}%`);
@@ -254,8 +258,9 @@ class InventoryService {
          AND LOWER(brand) = LOWER($2) 
          AND LOWER(model) = LOWER($3) 
          AND LOWER(COALESCE(specifications, '')) = LOWER($4)
+         AND branch_id = $5
        FOR UPDATE`,
-      [categoryName, productData.brand, productData.model, specifications]
+      [categoryName, productData.brand, productData.model, specifications, productData.branchId || user?.branchId || require('../../middleware/branchContext').getBranchStore()?.branchId || 1]
     );
 
     if (existingRes.rows.length > 0) {
@@ -291,9 +296,10 @@ class InventoryService {
       }
 
       // Log inventory movement
+      const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
       await client.query(
-        `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date)
-         VALUES ($1, $2, 'IN', $3, $4, $5, $6, $7, $8)`,
+        `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date, branch_id)
+         VALUES ($1, $2, 'IN', $3, $4, $5, $6, $7, $8, $9)`,
         [
           existing.id,
           existing.code,
@@ -302,7 +308,8 @@ class InventoryService {
           sourceData.refType || 'Stock In',
           sourceData.refId || 'MANUAL',
           validUserId,
-          sourceData.date || new Date()
+          sourceData.date || new Date(),
+          existing.branch_id || branchId
         ]
       );
 
@@ -315,7 +322,8 @@ class InventoryService {
     }
 
     // Otherwise create new product
-    const code = await getNextProductCode(categoryId, client);
+    const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
+    const code = await getNextProductCode(categoryId, client, branchId);
     const productId = await getNextEntityId('products', 'id', 'PRD', 4, client);
 
     const customFieldsJson = JSON.stringify(productData.customFields || productData.custom_fields || {});
@@ -326,10 +334,10 @@ class InventoryService {
         screen_size, processor, ram, rom_ssd, hard_drive, graphics_card, accessory_category,
         description, others, specifications, custom_fields, condition, initial_stock, stock_in, stock_out,
         current_stock, low_stock_alert, cost_price, expected_sale_price, remarks, source_type,
-        source_id, source_name, purchase_invoice_no, date_added
+        source_id, source_name, purchase_invoice_no, date_added, branch_id
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-        $19::jsonb, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33
+        $19::jsonb, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34
       ) RETURNING *`,
       [
         productId,
@@ -364,7 +372,8 @@ class InventoryService {
         sourceData.sourceId || sourceData.refId || 'MANUAL',
         sourceData.sourceName || null,
         sourceData.invoiceNo || null,
-        sourceData.date || new Date()
+        sourceData.date || new Date(),
+        productData.branchId || user?.branchId || require('../../middleware/branchContext').getBranchStore()?.branchId || 1
       ]
     );
 
@@ -376,9 +385,10 @@ class InventoryService {
     }
 
     // Log movement
+    const newBranchId = productData.branchId || user?.branchId || require('../../middleware/branchContext').getBranchStore()?.branchId || 1;
     await client.query(
-      `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date)
-       VALUES ($1, $2, 'IN', $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date, branch_id)
+       VALUES ($1, $2, 'IN', $3, $4, $5, $6, $7, $8, $9)`,
       [
         productId,
         code,
@@ -387,7 +397,8 @@ class InventoryService {
         sourceData.refType || 'Manual Entry',
         sourceData.refId || 'MANUAL',
         validUserId,
-        sourceData.date || new Date()
+        sourceData.date || new Date(),
+        newBranchId
       ]
     );
 
@@ -477,6 +488,8 @@ class InventoryService {
     let finalRefId = refId || 'MANUAL';
     const adjDate = date || new Date();
 
+    const candidateBranchId = product.branch_id || user?.branchId || require('../../middleware/branchContext').getBranchStore()?.branchId || 1;
+
     // 1. Check if Vendor Ledger should be created (when Stock IN from vendor)
     let vId = vendorId;
     let vName = vendorName;
@@ -485,21 +498,21 @@ class InventoryService {
     if (direction === 'IN' && hasVendor) {
       // Resolve vendor ID / Name
       if (vId && (!vName || vName === 'Manual Entry')) {
-        const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE id = $1', [vId]);
+        const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE id = $1 AND branch_id = $2', [vId, candidateBranchId]);
         if (vRes.rows.length > 0) {
           vName = vRes.rows[0].name;
-          if (!vendorContact) vendorContact = vRes.rows[0].contact;
+          if (!vendorContact) vendorContact = vRes.rows[0].contact
         }
       } else if (vName && (!vId || vId === 'MANUAL')) {
-        const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE LOWER(name) = LOWER($1)', [vName.trim()]);
+        const vRes = await client.query('SELECT id, name, contact FROM vendors WHERE LOWER(name) = LOWER($1) AND branch_id = $2', [vName.trim(), candidateBranchId]);
         if (vRes.rows.length > 0) {
           vId = vRes.rows[0].id;
           vName = vRes.rows[0].name;
           if (!vendorContact) vendorContact = vRes.rows[0].contact;
         } else {
           vId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
-          await client.query('INSERT INTO vendors (id, name, contact) VALUES ($1, $2, $3)', [
-            vId, vName.trim(), vendorContact || null
+          await client.query('INSERT INTO vendors (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)', [
+            vId, vName.trim(), vendorContact || null, candidateBranchId
           ]);
         }
       }
@@ -515,11 +528,11 @@ class InventoryService {
 
         let candidateInvNo = purchaseInvoiceNo && purchaseInvoiceNo !== 'MANUAL'
           ? purchaseInvoiceNo
-          : await getNextInvoiceNo('vendor_purchase', client);
+          : await getNextInvoiceNo('vendor_purchase', client, candidateBranchId);
 
-        const invExistsCheck = await client.query('SELECT 1 FROM invoices WHERE invoice_no = $1', [candidateInvNo]);
+        const invExistsCheck = await client.query('SELECT 1 FROM invoices WHERE invoice_no = $1 AND branch_id = $2', [candidateInvNo, candidateBranchId]);
         if (invExistsCheck.rows.length > 0) {
-          candidateInvNo = await getNextInvoiceNo('vendor_purchase', client);
+          candidateInvNo = await getNextInvoiceNo('vendor_purchase', client, candidateBranchId);
         }
 
         const targetInvoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
@@ -527,18 +540,18 @@ class InventoryService {
 
         const invRes = await client.query(
           `INSERT INTO invoices (
-            id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
+            id, branch_id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
             product_total, service_total, total, paid, initial_paid, balance, payment_method,
             reference_id, payment_status, is_voided, created_by, created_by_name
           ) VALUES (
-            $1, $2, 'Vendor Purchase', 'vendor_purchase', $3, 'Vendor', $4, $5, $6,
+            $1, $15, $2, 'Vendor Purchase', 'vendor_purchase', $3, 'Vendor', $4, $5, $6,
             $7, 0, $7, $8, $8, $9, $10,
             $11, $12, FALSE, $13, $14
           ) RETURNING *`,
           [
             targetInvoiceId, targetInvoiceNo, adjDate, vId, vName, vendorContact,
             totalCost, paidAmount, balance, paymentMethod,
-            referenceId, pStatus, validUserId, user?.name || 'Admin'
+            referenceId, pStatus, validUserId, user?.name || 'Admin', candidateBranchId
           ]
         );
 
@@ -559,18 +572,18 @@ class InventoryService {
           const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
           await client.query(
             `INSERT INTO payments (
-              id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+              id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
               direction, amount, date, payment_method, reference_id, notes, affects_money,
               is_initial_settlement, created_by, created_by_name
             ) VALUES (
-              $1, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
+              $1, $13, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
               'Paid', $6, $7, $8, $9, $10, TRUE,
               TRUE, $11, $12
             )`,
             [
               payId, targetInvoiceId, targetInvoiceNo, vId, vName,
               paidAmount, adjDate, paymentMethod, referenceId, `Stock Adjustment Payment (${product.code})`,
-              validUserId, user?.name || 'Admin'
+              validUserId, user?.name || 'Admin', candidateBranchId
             ]
           );
         }
@@ -579,10 +592,10 @@ class InventoryService {
           const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
           await client.query(
             `INSERT INTO accounts (
-              id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+              id, branch_id, type, party_type, party_id, party_name, invoice_id, invoice_no,
               amount, remaining, status, date
-            ) VALUES ($1, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
-            [accId, vId, vName, targetInvoiceId, targetInvoiceNo, balance, balance, adjDate]
+            ) VALUES ($1, $9, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
+            [accId, vId, vName, targetInvoiceId, targetInvoiceNo, balance, balance, adjDate, candidateBranchId]
           );
         }
 
@@ -595,8 +608,8 @@ class InventoryService {
 
     // 2. Movement logging
     await client.query(
-      `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date, branch_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         productId,
         product.code,
@@ -606,7 +619,8 @@ class InventoryService {
         finalRefType,
         finalRefId,
         validUserId,
-        adjDate
+        adjDate,
+        candidateBranchId
       ]
     );
 

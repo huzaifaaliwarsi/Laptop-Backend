@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin } = require('../../middleware/rbac');
-const { CacheService, cacheRoute } = require('../../config/cache');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 const { getAvailableBalance } = require('../../utils/financialFormulas');
 
 router.use(authenticateToken);
@@ -993,7 +993,8 @@ router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next)
   try {
     const { from, to } = req.query;
 
-    const settingsRes = await db.query(`SELECT opening_cash, opening_online FROM business_settings WHERE id = 1`);
+    const branchId = getBranchIdFromReq(req) || 1;
+    const settingsRes = await db.query(`SELECT opening_cash, opening_online FROM business_settings WHERE branch_id = $1`, [branchId]);
     const openingCash = r2(settingsRes.rows[0]?.opening_cash || 0);
     const openingOnline = r2(settingsRes.rows[0]?.opening_online || 0);
 

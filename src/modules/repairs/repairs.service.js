@@ -55,7 +55,7 @@ class RepairService {
     const linesRes = await client.query('SELECT * FROM repair_job_lines WHERE repair_job_id = $1', [repairId]);
     const partsRes = await client.query('SELECT * FROM repair_parts_used WHERE repair_job_id = $1', [repairId]);
 
-    const setRes = await client.query('SELECT adjust_diagnosis_fee FROM business_settings WHERE id = 1');
+    const setRes = await client.query('SELECT adjust_diagnosis_fee FROM business_settings WHERE TRUE');
     const adjustDiagnosisFee = setRes.rows.length > 0 && setRes.rows[0].adjust_diagnosis_fee === true;
 
     const isDiagOrigin = job.origin_job_type === 'Diagnosis Job' || job.job_type === 'Diagnosis Job';
@@ -91,18 +91,18 @@ class RepairService {
       invoiceId = await getNextEntityId('invoices', 'id', 'RINV', 5, client);
       await client.query(
         `INSERT INTO invoices (
-          id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
+          id, branch_id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
           product_total, service_total, total, paid, initial_paid, balance, payment_method,
           payment_status, is_voided, repair_job_id, created_by, created_by_name
         ) VALUES (
-          $1, $2, $3, $4, $5, 'Customer', $6, $7, $8,
+          $1, $20, $2, $3, $4, $5, 'Customer', $6, $7, $8,
           $9, $10, $11, $12, $13, $14, $15,
           $16, FALSE, $17, $18, $19
         )`,
         [
           invoiceId, job.tracking_id, invoiceType, invoiceKey, job.date, job.customer_id, job.customer_name, job.contact,
           partsTotal, serviceTotal, total, paid, paid, balance, job.payment_method || 'Cash',
-          payStatus, repairId, job.created_by, job.created_by_name
+          payStatus, repairId, job.created_by, job.created_by_name, job.branch_id || 1
         ]
       );
       await client.query('UPDATE repair_jobs SET invoice_id = $1 WHERE id = $2', [invoiceId, repairId]);
@@ -118,10 +118,10 @@ class RepairService {
           balance = $7,
           payment_status = $8,
           updated_at = CURRENT_TIMESTAMP
-         WHERE id = $9`,
+         WHERE id = $9 AND branch_id = $10`,
         [
           invoiceType, invoiceKey,
-          partsTotal, serviceTotal, total, paid, balance, payStatus, invoiceId
+          partsTotal, serviceTotal, total, paid, balance, payStatus, invoiceId, job.branch_id || 1
         ]
       );
     }
@@ -164,23 +164,23 @@ class RepairService {
     }
 
     // Sync Customer Receivable in accounts
-    const accRes = await client.query('SELECT * FROM accounts WHERE invoice_id = $1 AND type = $2', [invoiceId, 'Customer Receivable']);
+    const accRes = await client.query('SELECT * FROM accounts WHERE invoice_id = $1 AND type = $2 AND branch_id = $3', [invoiceId, 'Customer Receivable', job.branch_id || 1]);
     if (balance > 0) {
       if (accRes.rows.length > 0) {
         await client.query(
-          `UPDATE accounts SET amount = $1, remaining = $2, status = 'Open' WHERE id = $3`,
-          [total, balance, accRes.rows[0].id]
+          `UPDATE accounts SET amount = $1, remaining = $2, status = 'Open' WHERE id = $3 AND branch_id = $4`,
+          [total, balance, accRes.rows[0].id, job.branch_id || 1]
         );
       } else {
         const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
         await client.query(
-          `INSERT INTO accounts (id, type, party_type, party_id, party_name, invoice_id, invoice_no, amount, remaining, status, date)
-           VALUES ($1, 'Customer Receivable', 'Customer', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
-          [accId, job.customer_id, job.customer_name, invoiceId, job.tracking_id, total, balance, job.date]
+          `INSERT INTO accounts (id, branch_id, type, party_type, party_id, party_name, invoice_id, invoice_no, amount, remaining, status, date)
+           VALUES ($1, $9, 'Customer Receivable', 'Customer', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
+          [accId, job.customer_id, job.customer_name, invoiceId, job.tracking_id, total, balance, job.date, job.branch_id || 1]
         );
       }
     } else if (accRes.rows.length > 0) {
-      await client.query(`UPDATE accounts SET remaining = 0, status = 'Settled' WHERE id = $1`, [accRes.rows[0].id]);
+      await client.query(`UPDATE accounts SET remaining = 0, status = 'Settled' WHERE id = $1 AND branch_id = $2`, [accRes.rows[0].id, job.branch_id || 1]);
     }
   }
 
@@ -189,7 +189,7 @@ class RepairService {
    */
   static async sendAutomatedWhatsapp(job, customMessageOrNote = '', client = db, options = {}) {
     try {
-      const settingsRes = await client.query('SELECT auto_status_notifications FROM whatsapp_settings WHERE id = 1');
+      const settingsRes = await client.query('SELECT auto_status_notifications FROM whatsapp_settings WHERE TRUE');
       if (settingsRes.rows.length > 0 && settingsRes.rows[0].auto_status_notifications === false) {
         return;
       }
@@ -205,9 +205,9 @@ class RepairService {
       } else {
         convId = await getNextEntityId('whatsapp_conversations', 'id', 'CONV', 4, client);
         await client.query(
-          `INSERT INTO whatsapp_conversations (id, contact, name, status, lead_type)
-           VALUES ($1, $2, $3, 'Bot Active', 'Repair Notification')`,
-          [convId, cleanContact, job.customer_name]
+          `INSERT INTO whatsapp_conversations (id, contact, name, status, lead_type, branch_id)
+           VALUES ($1, $2, $3, 'Bot Active', 'Repair Notification', $4)`,
+          [convId, cleanContact, job.customer_name, job.branch_id || 1]
         );
       }
 
@@ -244,9 +244,9 @@ class RepairService {
       }
 
       await client.query(
-        `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag)
-         VALUES ($1, 'out', $2, 'tracking')`,
-        [convId, messageText]
+        `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag, branch_id)
+         VALUES ($1, 'out', $2, 'tracking', $3)`,
+        [convId, messageText, job.branch_id || 1]
       );
 
       await client.query(
@@ -428,18 +428,19 @@ class RepairService {
 
       const cleanName = customerName.trim();
       const cleanContact = contact.trim();
+      const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
 
       // Ensure customer
       let customerId = null;
       const custRes = await client.query(
-        `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2)`,
-        [cleanName, cleanContact]
+        `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2) AND branch_id = $3`,
+        [cleanName, cleanContact, branchId]
       );
       if (custRes.rows.length > 0) {
         customerId = custRes.rows[0].id;
       } else {
         customerId = await getNextEntityId('customers', 'id', 'CUS', 4, client);
-        await client.query(`INSERT INTO customers (id, name, contact) VALUES ($1, $2, $3)`, [customerId, cleanName, cleanContact]);
+        await client.query(`INSERT INTO customers (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)`, [customerId, cleanName, cleanContact, branchId]);
       }
 
       let techName = 'Unassigned';
@@ -450,7 +451,7 @@ class RepairService {
         }
       }
 
-      const trackingId = await getNextTrackingId(client);
+      const trackingId = await getNextTrackingId(client, branchId);
       const numPart = trackingId.split('-')[1] || String(Date.now()).slice(-5);
       const repairId = `REP-${numPart}`;
       const initialStatus = isDiag ? 'Diagnosis Received' : 'Job Received';
@@ -459,12 +460,12 @@ class RepairService {
 
       const jobRes = await client.query(
         `INSERT INTO repair_jobs (
-          id, tracking_id, job_type, origin_job_type, date, customer_id, customer_name, contact,
+          id, branch_id, tracking_id, job_type, origin_job_type, date, customer_id, customer_name, contact,
           technician_id, technician_name, priority, category_id, category_name, product_type, brand, model, serial, problem,
           extra_charges, extra_reason, total, paid, initial_paid, payment_method, payment_reference,
           remarks, status, duration, expected_completion, diagnosis_fee, created_by, created_by_name
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8,
+          $1, $33, $2, $3, $4, $5, $6, $7, $8,
           $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
           $19, $20, $21, $22, $23, $24, $25,
           $26, $27, $28, $29, $30, $31, $32
@@ -476,7 +477,7 @@ class RepairService {
           extraAmt, isDiag ? null : (extraReason ? extraReason.trim() : null), total, paid, paid, paymentMethod || 'Cash',
           paymentReference ? paymentReference.trim() : null, remarks ? remarks.trim() : null, initialStatus,
           isDiag ? (cleanLines[0]?.duration || '1-2 Hours') : (duration || null), expectedCompletion || null,
-          isDiag ? diagFee : 0, creator.id, creator.name
+          isDiag ? diagFee : 0, creator.id, creator.name, branchId
         ]
       );
 
@@ -501,11 +502,11 @@ class RepairService {
         const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
         await client.query(
           `INSERT INTO payments (
-            id, invoice_no, party_type, party_id, party_name, account_type,
+            id, branch_id, invoice_no, party_type, party_id, party_name, account_type,
             direction, amount, date, payment_method, reference_id, notes,
             affects_money, is_initial_settlement, created_by, created_by_name
           ) VALUES (
-            $1, $2, 'Customer', $3, $4, 'Customer Receivable',
+            $1, $12, $2, 'Customer', $3, $4, 'Customer Receivable',
             'Received', $5, $6, $7, $8, $9,
             TRUE, TRUE, $10, $11
           )`,
@@ -513,7 +514,7 @@ class RepairService {
             payId, trackingId, customerId, cleanName,
             paid, date || new Date(), paymentMethod || 'Cash', paymentReference || null,
             isDiag ? 'Diagnosis fee advance payment' : 'Initial repair job advance payment',
-            creator.id, creator.name
+            creator.id, creator.name, branchId
           ]
         );
       }
@@ -648,14 +649,14 @@ class RepairService {
           try {
             await client.query(
               `INSERT INTO repair_parts_movements (
-                part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, balance_after, performed_by, performed_by_name
-              ) VALUES ($1, $2, $3, 'OUT', $4, $5, 'Repair Job Issuance', $6, $7, $8, $9)`,
+                part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, balance_after, performed_by, performed_by_name, branch_id
+              ) VALUES ($1, $2, $3, 'OUT', $4, $5, 'Repair Job Issuance', $6, $7, $8, $9, $10)`,
               [
                 part.id, part.code, part.name, qty,
                 `Issued to repair job ${job.id} (${job.customer_name})`,
                 job.id,
                 Math.max(0, parseInt(part.current_stock || 0, 10) - qty),
-                user.id, user.name
+                user.id, user.name, job.branch_id || 1
               ]
             );
           } catch (mErr) {
@@ -1006,17 +1007,17 @@ class RepairService {
       // 1. Record in payments table
       await client.query(
         `INSERT INTO payments (
-          id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+          id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
           direction, amount, date, payment_method, reference_id, notes, affects_money,
           is_initial_settlement, created_by, created_by_name
         ) VALUES (
-          $1, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
+          $1, $13, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
           'Received', $6, $7, $8, $9, $10, TRUE, FALSE, $11, $12
         )`,
         [
           payId, job.invoice_id, job.tracking_id, job.customer_id, job.customer_name,
           payAmount, date || new Date(), pMethod, reference || null, note || 'Repair installment payment',
-          user.id, user.name
+          user.id, user.name, job.branch_id || 1
         ]
       );
 
@@ -1082,16 +1083,16 @@ class RepairService {
 
         await client.query(
           `INSERT INTO payments (
-            id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+            id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
             direction, amount, date, payment_method, reference_id, notes, affects_money,
             is_initial_settlement, created_by, created_by_name
           ) VALUES (
-            $1, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
+            $1, $11, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
             'Received', $6, CURRENT_DATE, $7, $8, 'Final clearance payment before delivery', TRUE, FALSE, $9, $10
           )`,
           [
             payId, job.invoice_id, job.tracking_id, job.customer_id, job.customer_name,
-            remaining, pMethod, paymentData?.reference || null, user.id, user.name
+            remaining, pMethod, paymentData?.reference || null, user.id, user.name, job.branch_id || 1
           ]
         );
 
@@ -1205,14 +1206,14 @@ class RepairService {
         try {
           await client.query(
             `INSERT INTO repair_parts_movements (
-              part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, balance_after, performed_by, performed_by_name
-            ) VALUES ($1, $2, $3, 'OUT', $4, $5, 'Repair Job Issuance', $6, $7, $8, $9)`,
+              part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, balance_after, performed_by, performed_by_name, branch_id
+            ) VALUES ($1, $2, $3, 'OUT', $4, $5, 'Repair Job Issuance', $6, $7, $8, $9, $10)`,
             [
               part.id, part.code, part.name, qty,
               `Issued to repair job ${job.id} (${job.customer_name})`,
               job.id,
               Math.max(0, parseInt(part.current_stock || 0, 10) - qty),
-              user?.id || null, user?.name || 'Technician'
+              user?.id || null, user?.name || 'Technician', job.branch_id || 1
             ]
           );
         } catch (mErr) {
@@ -1378,23 +1379,26 @@ class RepairService {
       const used = usedRes.rows[0];
       const returnQty = parseInt(used.quantity || 1, 10);
 
+      const jobRow = await client.query('SELECT id, branch_id FROM repair_jobs WHERE id = $1', [repairId]);
+      const branchId = jobRow.rows[0]?.branch_id || 1;
+
       // Return stock back to inventory
       if (used.part_id) {
         await client.query(
-          'UPDATE repair_parts SET current_stock = current_stock + $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-          [returnQty, used.part_id]
+          'UPDATE repair_parts SET current_stock = current_stock + $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND branch_id = $3',
+          [returnQty, used.part_id, branchId]
         );
 
         try {
           await client.query(
             `INSERT INTO repair_parts_movements (
-              part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, performed_by, performed_by_name
-            ) VALUES ($1, $2, $3, 'IN', $4, $5, 'Repair Job Return', $6, $7, $8)`,
+              part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, performed_by, performed_by_name, branch_id
+            ) VALUES ($1, $2, $3, 'IN', $4, $5, 'Repair Job Return', $6, $7, $8, $9)`,
             [
               used.part_id, used.product_code, used.name, returnQty,
               `Returned from repair job ${repairId}`,
               repairId,
-              user?.id || null, user?.name || 'Technician'
+              user?.id || null, user?.name || 'Technician', branchId
             ]
           );
         } catch (mErr) {
@@ -1739,15 +1743,15 @@ class RepairService {
 
       const insRes = await client.query(
         `INSERT INTO repair_additional_work_requests (
-          id, repair_job_id, tracking_id, fault_finding, recommended_service,
+          id, branch_id, repair_job_id, tracking_id, fault_finding, recommended_service,
           service_charge, parts_charge, total_quotation, customer_safe_note,
           parts_payload, status, quotation_snapshot, created_by, created_by_name
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Pending Approval', $11, $12, $13)
+        ) VALUES ($1, $14, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Pending Approval', $11, $12, $13)
         RETURNING *`,
         [
           reqId, repairId, job.tracking_id, faultFinding.trim(), recommendedService.trim(),
           sCharge, pCharge, totalQuotation, customerSafeNote ? customerSafeNote.trim() : null,
-          JSON.stringify(partsPayload), JSON.stringify(snapshot), validUserId, user?.name || 'Technician'
+          JSON.stringify(partsPayload), JSON.stringify(snapshot), validUserId, user?.name || 'Technician', job.branch_id || 1
         ]
       );
 
@@ -1763,9 +1767,9 @@ class RepairService {
         } else {
           convId = await getNextEntityId('whatsapp_conversations', 'id', 'CONV', 4, client);
           await client.query(
-            `INSERT INTO whatsapp_conversations (id, contact, name, status, lead_type)
-             VALUES ($1, $2, $3, 'Bot Active', 'Repair Notification')`,
-            [convId, cleanContact, job.customer_name]
+            `INSERT INTO whatsapp_conversations (id, contact, name, status, lead_type, branch_id)
+             VALUES ($1, $2, $3, 'Bot Active', 'Repair Notification', $4)`,
+            [convId, cleanContact, job.customer_name, job.branch_id || 1]
           );
         }
 
@@ -1783,9 +1787,9 @@ class RepairService {
         });
 
         await client.query(
-          `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag)
-           VALUES ($1, 'out', $2, 'approval_request')`,
-          [convId, approvalMsg]
+          `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag, branch_id)
+           VALUES ($1, 'out', $2, 'approval_request', $3)`,
+          [convId, approvalMsg, job.branch_id || 1]
         );
 
         await client.query(
@@ -1965,12 +1969,12 @@ class RepairService {
           // Record inventory movement ledger
           await client.query(
             `INSERT INTO repair_parts_movements (
-              part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, balance_after, performed_by, performed_by_name
-            ) VALUES ($1, $2, $3, 'OUT', $4, $5, 'Additional Repair Job Usage', $6, $7, $8, $9)`,
+              part_id, part_code, part_name, direction, quantity, reason, reference_type, reference_id, balance_after, performed_by, performed_by_name, branch_id
+            ) VALUES ($1, $2, $3, 'OUT', $4, $5, 'Additional Repair Job Usage', $6, $7, $8, $9, $10)`,
             [
               partObj.id, partObj.code, partObj.name, qty,
               `Consumed for repair ${job.tracking_id} via additional fault approval`,
-              job.tracking_id, newStock, validUserId, user?.name || approvalSource
+              job.tracking_id, newStock, validUserId, user?.name || approvalSource, job.branch_id || 1
             ]
           );
         }
@@ -2011,9 +2015,9 @@ class RepairService {
           });
 
           await client.query(
-            `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag)
-             VALUES ($1, 'out', $2, 'approval_confirmed')`,
-            [convId, confMsg]
+            `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag, branch_id)
+             VALUES ($1, 'out', $2, 'approval_confirmed', $3)`,
+            [convId, confMsg, job.branch_id || 1]
           );
 
           await client.query(
@@ -2130,9 +2134,9 @@ class RepairService {
           });
 
           await client.query(
-            `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag)
-             VALUES ($1, 'out', $2, 'approval_declined')`,
-            [convId, declineMsg]
+            `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag, branch_id)
+             VALUES ($1, 'out', $2, 'approval_declined', $3)`,
+            [convId, declineMsg, job.branch_id || 1]
           );
 
           await client.query(

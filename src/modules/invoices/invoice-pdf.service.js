@@ -90,7 +90,7 @@ async function getBusinessSettings() {
   try {
     const res = await db.query(
       `SELECT company_name, tagline, invoice_subtitle, phone, email, tax_number, ntn, strn, pos_id, fbr_pos_id, address, invoice_footer, logo_data
-       FROM business_settings WHERE id = 1`
+       FROM business_settings WHERE TRUE`
     );
     if (res.rows.length > 0) return res.rows[0];
   } catch (e) {

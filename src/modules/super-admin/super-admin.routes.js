@@ -97,8 +97,8 @@ async function computeBranchMetrics(pool, branchMeta = {}, from = null, to = nul
         COALESCE(SUM(CASE WHEN type = 'Buyback Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_buybacks,
         COALESCE(SUM(CASE WHEN type = 'Exchange Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_exchanges,
         COALESCE(SUM(CASE WHEN type = 'Return Invoice' AND is_voided = FALSE THEN total ELSE 0 END), 0) AS total_returns
-      FROM invoices WHERE 1=1 ${dateFilterInv}
-    `, invParams),
+      FROM invoices WHERE branch_id = $1 ${dateFilterInv.replace(/\$(\d+)/g, (_, n) => '$' + (Number(n) + 1))}
+    `, [branchMeta.id, ...invParams]),
 
     // 2. Repairs
     pool.query(`
@@ -107,8 +107,8 @@ async function computeBranchMetrics(pool, branchMeta = {}, from = null, to = nul
         COUNT(CASE WHEN status NOT IN ('Delivered & Closed', 'Cancelled', 'Returned Without Repair') THEN 1 END) AS active_repairs,
         COUNT(CASE WHEN status = 'Delivered & Closed' THEN 1 END) AS completed_repairs,
         COUNT(*) AS total_repairs_count
-      FROM repair_jobs WHERE 1=1 ${dateFilterRep}
-    `, repParams),
+      FROM repair_jobs WHERE branch_id = $1 ${dateFilterRep.replace(/\$(\d+)/g, (_, n) => '$' + (Number(n) + 1))}
+    `, [branchMeta.id, ...repParams]),
 
     // 3. COGS (Cost of Goods Sold)
     pool.query(`
@@ -116,8 +116,8 @@ async function computeBranchMetrics(pool, branchMeta = {}, from = null, to = nul
       FROM invoice_items ii
       JOIN invoices inv ON ii.invoice_id = inv.id
       LEFT JOIN products p ON ii.product_id = p.id
-      WHERE inv.type = 'Sales Invoice' AND inv.is_voided = FALSE ${dateFilterInv.replace(/date/g, 'inv.date')}
-    `, invParams),
+      WHERE inv.branch_id = $1 AND inv.type = 'Sales Invoice' AND inv.is_voided = FALSE ${dateFilterInv.replace(/date/g, 'inv.date').replace(/\$(\d+)/g, (_, n) => '$' + (Number(n) + 1))}
+    `, [branchMeta.id, ...invParams]),
 
     // 4. Expenses
     pool.query(`
@@ -125,8 +125,8 @@ async function computeBranchMetrics(pool, branchMeta = {}, from = null, to = nul
         COALESCE(SUM(amount), 0) AS total_expenses,
         COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN amount ELSE 0 END), 0) AS cash_expenses,
         COALESCE(SUM(CASE WHEN payment_method = 'Online' THEN amount ELSE 0 END), 0) AS online_expenses
-      FROM expenses WHERE 1=1 ${dateFilterExp}
-    `, expParams),
+      FROM expenses WHERE branch_id = $1 ${dateFilterExp.replace(/\$(\d+)/g, (_, n) => '$' + (Number(n) + 1))}
+    `, [branchMeta.id, ...expParams]),
 
     // 5. Accounts (Receivables & Payables)
     pool.query(`
@@ -150,11 +150,11 @@ async function computeBranchMetrics(pool, branchMeta = {}, from = null, to = nul
     `),
 
     // 7. Cash Drawer & Online Liquidity
-    getAvailableBalance('Cash', pool),
-    getAvailableBalance('Online', pool),
+    getAvailableBalance('Cash', pool, branchMeta.id),
+    getAvailableBalance('Online', pool, branchMeta.id),
 
     // 8. Staff Count
-    pool.query(`SELECT COUNT(*) AS total_staff FROM users WHERE status = 'Active'`)
+    pool.query(`SELECT COUNT(*) AS total_staff FROM users WHERE status = 'Active' AND branch_id = $1`, [branchMeta.id])
   ]);
 
   const sRow = salesRes.rows[0] || {};
@@ -190,6 +190,8 @@ async function computeBranchMetrics(pool, branchMeta = {}, from = null, to = nul
     address: branchMeta.address || '',
     adminName: branchMeta.admin_name || '',
     adminUsername: branchMeta.admin_username || '',
+    adminPassword: branchMeta.admin_password || (branchMeta.admin_password_encrypted ? branchManager.decrypt(branchMeta.admin_password_encrypted) : '') || '',
+    admin_password: branchMeta.admin_password || (branchMeta.admin_password_encrypted ? branchManager.decrypt(branchMeta.admin_password_encrypted) : '') || '',
     dbName: branchMeta.db_name,
     dbHost: branchMeta.db_host,
     schemaVersion: branchMeta.schema_version,
@@ -454,6 +456,8 @@ router.get(['/dashboard', '/reports/consolidated'], requireSuperAdmin, cacheRout
           status: b.status,
           adminName: b.admin_name,
           adminUsername: b.admin_username,
+          adminPassword: b.admin_password || (b.admin_password_encrypted ? branchManager.decrypt(b.admin_password_encrypted) : '') || '',
+          admin_password: b.admin_password || (b.admin_password_encrypted ? branchManager.decrypt(b.admin_password_encrypted) : '') || '',
           createdAt: b.created_at
         }))
       }
@@ -497,25 +501,25 @@ router.get('/branches/:id', requireSuperAdmin, async (req, res, next) => {
 
     try {
       const pool = await branchManager.getBranchPool(branchId, true);
-      // Fetch live business settings configured from the Settings page
+      // Fetch live business settings configured from the Settings page for THIS branch
       const settingsRes = await pool.query(`
         SELECT company_name, tagline, invoice_subtitle, phone, email, address, tax_number, ntn, strn, pos_id, updated_at
         FROM business_settings
-        WHERE id = 1
+        WHERE branch_id = $1
         LIMIT 1
-      `);
+      `, [branchId]);
       if (settingsRes.rows.length > 0) {
         branchSettings = settingsRes.rows[0];
       }
 
-      // Fetch primary branch admin user if available
+      // Fetch primary branch admin user for THIS branch
       const adminRes = await pool.query(`
         SELECT name, username
         FROM users
-        WHERE role = 'admin'
+        WHERE role = 'admin' AND branch_id = $1
         ORDER BY created_at ASC
         LIMIT 1
-      `);
+      `, [branchId]);
       if (adminRes.rows.length > 0) {
         branchAdmin = adminRes.rows[0];
       }
@@ -531,6 +535,8 @@ router.get('/branches/:id', requireSuperAdmin, async (req, res, next) => {
       invoice_subtitle: branchSettings?.invoice_subtitle || '',
       admin_name: branchAdmin?.name || branch.admin_name,
       admin_username: branchAdmin?.username || branch.admin_username,
+      admin_password: branch.admin_password || branchManager.decrypt(branch.admin_password_encrypted) || '',
+      adminPassword: branch.admin_password || branchManager.decrypt(branch.admin_password_encrypted) || '',
       status: branch.status || 'Active',
       city: branch.city,
       phone: branchSettings?.phone || branch.phone,
@@ -553,14 +559,14 @@ router.get('/branches/:id', requireSuperAdmin, async (req, res, next) => {
   }
 });
 
-// PUT /api/super-admin/branches/:id — Update Branch metadata (Name, address, phone, email, city)
+// PUT /api/super-admin/branches/:id — Update Branch metadata & Admin credentials
 router.put('/branches/:id', requireSuperAdmin, async (req, res, next) => {
   try {
     const branchId = parseInt(req.params.id, 10);
     if (isNaN(branchId)) {
       return res.status(400).json({ success: false, message: 'Invalid branch ID.' });
     }
-    const { branch_name, phone, email, city, address, admin_name } = req.body;
+    const { branch_name, phone, email, city, address, admin_name, admin_username, admin_password } = req.body;
 
     if (!branch_name) {
       return res.status(400).json({
@@ -569,13 +575,30 @@ router.put('/branches/:id', requireSuperAdmin, async (req, res, next) => {
       });
     }
 
+    // If admin_username is being updated, verify global uniqueness across other branches
+    if (admin_username && admin_username.trim()) {
+      const normUsername = admin_username.trim().toLowerCase();
+      const uCheck = await branchManager.masterPool.query(`
+        SELECT id FROM master_staff_identities
+        WHERE normalized_username = $1 AND branch_id != $2
+      `, [normUsername, branchId]);
+      if (uCheck.rows.length > 0) {
+        return res.status(409).json({
+          success: false,
+          message: `Username "${admin_username.trim()}" is already assigned to another branch.`
+        });
+      }
+    }
+
     const updated = await branchManager.updateBranch(branchId, {
       branch_name,
       phone,
       email,
       city,
       address,
-      admin_name
+      admin_name,
+      admin_username: admin_username ? admin_username.trim().toLowerCase() : undefined,
+      admin_password: admin_password ? admin_password.trim() : undefined
     });
 
     if (!updated) {
@@ -583,6 +606,79 @@ router.put('/branches/:id', requireSuperAdmin, async (req, res, next) => {
         success: false,
         message: 'Branch not found.'
       });
+    }
+
+    // Sync admin user credentials inside the branch pool
+    try {
+      const pool = await branchManager.getBranchPool(branchId, true);
+      const userRes = await pool.query(
+        `SELECT id, username FROM users WHERE role = 'admin' AND branch_id = $1 ORDER BY created_at ASC LIMIT 1`,
+        [branchId]
+      );
+      if (userRes.rows.length > 0) {
+        const adminUser = userRes.rows[0];
+        const updates = [];
+        const params = [];
+        let pIdx = 1;
+
+        if (admin_name && admin_name.trim()) {
+          updates.push(`name = $${pIdx++}`);
+          params.push(admin_name.trim());
+        }
+        if (admin_username && admin_username.trim()) {
+          updates.push(`username = $${pIdx++}`);
+          params.push(admin_username.trim().toLowerCase());
+        }
+        if (admin_password && admin_password.trim().length >= 4) {
+          const salt = await bcrypt.genSalt(10);
+          const hash = await bcrypt.hash(admin_password.trim(), salt);
+          updates.push(`password_hash = $${pIdx++}`);
+          params.push(hash);
+        }
+
+        if (updates.length > 0) {
+          updates.push(`updated_at = CURRENT_TIMESTAMP`);
+          params.push(adminUser.id);
+          await pool.query(`UPDATE users SET ${updates.join(', ')} WHERE id = $${pIdx}`, params);
+        }
+
+        // Also sync master_staff_identities registry
+        if (admin_username && admin_username.trim()) {
+          await branchManager.masterPool.query(`
+            UPDATE master_staff_identities
+            SET normalized_username = $1, updated_at = CURRENT_TIMESTAMP
+            WHERE branch_id = $2 AND role = 'admin'
+          `, [admin_username.trim().toLowerCase(), branchId]);
+        }
+      } else {
+        const finalUser = (admin_username && admin_username.trim()) || updated.admin_username;
+        const finalName = (admin_name && admin_name.trim()) || updated.admin_name || 'Branch Admin';
+        const finalPass = (admin_password && admin_password.trim()) || updated.admin_password || 'admin123';
+        if (finalUser) {
+          const salt = await bcrypt.genSalt(10);
+          const hash = await bcrypt.hash(finalPass, salt);
+          await pool.query(`
+            INSERT INTO users (id, branch_id, name, contact, designation, role, username, password_hash, status)
+            VALUES ($1, $2, $3, $4, 'Branch Manager', 'admin', $5, $6, 'Active')
+            ON CONFLICT (username) DO UPDATE SET
+              branch_id = EXCLUDED.branch_id,
+              name = EXCLUDED.name,
+              password_hash = EXCLUDED.password_hash,
+              status = 'Active'
+          `, [`USR-ADMIN-BR0${branchId}`, branchId, finalName, phone ? String(phone).trim() : null, finalUser.toLowerCase(), hash]);
+
+          await branchManager.masterPool.query(`
+            INSERT INTO master_staff_identities (
+              branch_id, branch_user_id, normalized_username, role, status
+            ) VALUES ($1, $2, $3, 'admin', 'Active')
+            ON CONFLICT (normalized_username) DO UPDATE SET
+              branch_id = EXCLUDED.branch_id,
+              status = 'Active'
+          `, [branchId, `USR-ADMIN-BR0${branchId}`, finalUser.toLowerCase()]);
+        }
+      }
+    } catch (userErr) {
+      console.warn(`[SuperAdmin] Note: Could not sync admin user for branch ${branchId}:`, userErr.message);
     }
 
     // Also sync business_settings inside the branch database if accessible
@@ -596,8 +692,8 @@ router.put('/branches/:id', requireSuperAdmin, async (req, res, next) => {
             city = COALESCE($4, city),
             address = COALESCE($5, address),
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = 1
-      `, [branch_name, phone, email, city, address]);
+        WHERE branch_id = $6
+      `, [branch_name, phone, email, city, address, branchId]);
     } catch (syncErr) {
       console.warn(`[SuperAdmin] Note: Could not sync business_settings for branch ${branchId}:`, syncErr.message);
     }
@@ -608,7 +704,7 @@ router.put('/branches/:id', requireSuperAdmin, async (req, res, next) => {
       VALUES ($1, 'BRANCH_METADATA_UPDATED', $2, $3)
     `, [
       branchId,
-      JSON.stringify({ branch_name, phone, email, city, address }),
+      JSON.stringify({ branch_name, phone, email, city, address, admin_username: admin_username || updated.admin_username }),
       req.user.username
     ]);
 
@@ -616,7 +712,7 @@ router.put('/branches/:id', requireSuperAdmin, async (req, res, next) => {
 
     return res.json({
       success: true,
-      message: 'Branch details updated successfully.',
+      message: 'Branch details and admin credentials updated successfully.',
       data: updated
     });
   } catch (error) {
@@ -764,9 +860,9 @@ router.post('/branches/:id/admin/reset-password', requireSuperAdmin, async (req,
     const updateRes = await branchPool.query(`
       UPDATE users 
       SET password_hash = $1, updated_at = CURRENT_TIMESTAMP 
-      WHERE LOWER(username) = $2 OR role = 'admin'
+      WHERE (LOWER(username) = $2 OR role = 'admin') AND branch_id = $3
       RETURNING id, name, username, role
-    `, [passHash, targetUser]);
+    `, [passHash, targetUser, branchId]);
 
     if (updateRes.rows.length === 0) {
       return res.status(404).json({
@@ -774,6 +870,15 @@ router.post('/branches/:id/admin/reset-password', requireSuperAdmin, async (req,
         message: `Admin user not found in Branch ${branchId} database.`
       });
     }
+
+    // Also sync encrypted admin password in master_branches for display in Super Admin view
+    await branchManager.masterPool.query(`
+      UPDATE master_branches
+      SET admin_password_encrypted = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+    `, [branchManager.encrypt(newPassword), branchId]);
+
+    await CacheService.invalidatePattern('route:*:/api/super-admin*');
 
     return res.json({
       success: true,
@@ -853,15 +958,29 @@ router.get('/branch-admins', requireSuperAdmin, async (req, res, next) => {
         const usersRes = await pool.query(`
           SELECT id, name, contact, designation, role, username, status, created_at, updated_at
           FROM users
-          WHERE role = 'admin'
+          WHERE role = 'admin' AND branch_id = $1
           ORDER BY created_at ASC
-        `);
+        `, [b.id]);
+        let admins = usersRes.rows;
+        if (admins.length === 0 && b.admin_username) {
+          admins = [{
+            id: `USR-ADMIN-BR0${b.id}`,
+            name: b.admin_name || 'Branch Admin',
+            contact: b.phone || '',
+            designation: 'Branch Manager',
+            role: 'admin',
+            username: b.admin_username,
+            status: b.status || 'Active',
+            created_at: b.created_at,
+            updated_at: b.updated_at
+          }];
+        }
         branchAdmins.push({
           branchId: b.id,
           branchCode: b.branch_code,
           branchName: b.branch_name,
           branchStatus: b.status,
-          admins: usersRes.rows
+          admins: admins
         });
       } catch (err) {
         branchAdmins.push({
@@ -910,15 +1029,25 @@ router.post('/branches/:id/reset-admin-password', requireSuperAdmin, async (req,
 
     if (username) {
       await pool.query(
-        `UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE LOWER(username) = LOWER($2)`,
-        [newHash, String(username).trim()]
+        `UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE LOWER(username) = LOWER($2) AND branch_id = $3`,
+        [newHash, String(username).trim(), branchId]
       );
     } else {
       await pool.query(
-        `UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE role = 'admin'`,
-        [newHash]
+        `UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE role = 'admin' AND branch_id = $2`,
+        [newHash, branchId]
       );
     }
+
+    // Also update encrypted admin password in master_branches for display in Super Admin view
+    await branchManager.masterPool.query(`
+      UPDATE master_branches
+      SET admin_password_encrypted = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+    `, [branchManager.encrypt(newPassword), branchId]);
+
+    // Invalidate super-admin cache
+    await CacheService.invalidatePattern('route:*:/api/super-admin*');
 
     // Write Master Audit Log
     await branchManager.masterPool.query(`
@@ -980,8 +1109,8 @@ async function handleDeleteBranchAdmin(req, res, next) {
     // 3. Connect to branch pool and find target admin user
     const pool = await branchManager.getBranchPool(bId, true);
     const userRes = await pool.query(
-      `SELECT id, name, username, role, contact FROM users WHERE id = $1 OR LOWER(username) = LOWER($1)`,
-      [adminId]
+      `SELECT id, name, username, role, contact FROM users WHERE (id = $1 OR LOWER(username) = LOWER($1)) AND branch_id = $2`,
+      [adminId, bId]
     );
 
     if (userRes.rows.length === 0) {
@@ -1066,8 +1195,8 @@ async function handleToggleBranchAdminStatus(req, res, next) {
 
     const pool = await branchManager.getBranchPool(branchId, true);
     const userRes = await pool.query(
-      `SELECT id, name, username, status, role FROM users WHERE id = $1 LIMIT 1`,
-      [adminId]
+      `SELECT id, name, username, status, role FROM users WHERE id = $1 AND branch_id = $2 LIMIT 1`,
+      [adminId, branchId]
     );
 
     if (userRes.rows.length === 0) {
@@ -1316,39 +1445,9 @@ router.post('/branches/:id/delete', requireSuperAdmin, async (req, res, next) =>
       });
     }
 
-    // 6. Permanent Delete action: Disconnect pool & delete registration
-    try {
-      await branchManager.closeBranchPool(branchId);
-    } catch (poolErr) {
-      console.warn(`[Branch Deletion] Pool teardown notice:`, poolErr.message);
-    }
-
-    // Clean up WhatsApp auth session for this branch
-    try {
-      const baileys = require('../whatsapp/baileys.service');
-      await baileys.clearAuthSession(branchId);
-    } catch (waErr) {}
-
-    // Release staff usernames/phones from Master Identity Registry
-    await branchManager.masterPool.query('DELETE FROM master_staff_identities WHERE branch_id = $1', [branchId]);
-
-    // Remove from master_branches
-    await branchManager.masterPool.query('DELETE FROM master_branches WHERE id = $1', [branchId]);
-
-    // Record immutable Master Audit Log
-    await branchManager.masterPool.query(`
-      INSERT INTO master_audit_logs (branch_id, action, details, performed_by)
-      VALUES (NULL, 'BRANCH_PERMANENTLY_DELETED', $1::jsonb, $2)
-    `, [
-      JSON.stringify({
-        branchId: branch.id,
-        branchCode: branch.branch_code,
-        branchName: branch.branch_name,
-        dbName: branch.db_name,
-        deletedAt: new Date().toISOString()
-      }),
-      req.user.username || 'superadmin'
-    ]);
+    await require('../../services/deleteBranch').deleteEmptyBranch(branchManager.masterPool, branchId, req.user.username || 'superadmin');
+    await branchManager.closeBranchPool(branchId);
+    try { await require('../whatsapp/baileys.service').clearAuthSession(branchId); } catch (_) {}
 
     await CacheService.invalidatePattern('route:*:/api/super-admin*');
 

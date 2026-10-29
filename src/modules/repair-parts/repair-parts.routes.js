@@ -14,8 +14,10 @@ router.use(authenticateToken);
 router.get('/', cacheRoute(60), async (req, res, next) => {
   try {
     const { search, category, status, inStockOnly, lowStockOnly } = req.query;
+    const branchId = getBranchIdFromReq(req) || 1;
     let queryText = 'SELECT * FROM repair_parts WHERE 1=1';
-    const params = [];
+    const params = [branchId];
+    queryText += ' AND branch_id = $1';
 
     if (category && String(category).trim() !== '') {
       params.push(category.trim());

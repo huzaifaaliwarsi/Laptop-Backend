@@ -1,158 +1,59 @@
-const db = require('../config/db');
+﻿const db = require('../config/db');
+const branchContext = require('../middleware/branchContext');
 
-/**
- * Generates the next sequential product code based on category prefix (e.g. LPT-0001)
- */
-async function getNextProductCode(categoryId, client = db) {
-  let prefix = 'PRD';
-  if (categoryId) {
-    const catRes = await client.query('SELECT code_prefix, name FROM product_categories WHERE id = $1', [categoryId]);
-    if (catRes.rows.length > 0) {
-      prefix = catRes.rows[0].code_prefix || String(catRes.rows[0].name).replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'PRD';
-    }
-  }
-
-  // Count existing products with this prefix (case-insensitive)
-  const res = await client.query(
-    `SELECT code FROM products WHERE code ILIKE $1`,
-    [`${prefix}-%`]
-  );
-
-  let maxNum = 0;
-  for (const row of res.rows) {
-    const parts = String(row.code).split('-');
-    const numPart = parseInt(parts[parts.length - 1], 10);
-    if (!isNaN(numPart) && numPart > maxNum) {
-      maxNum = numPart;
-    }
-  }
-
-  let nextNum = maxNum + 1;
-  let candidate = `${prefix}-${String(nextNum).padStart(4, '0')}`;
-
-  while (true) {
-    const check = await client.query('SELECT 1 FROM products WHERE code = $1', [candidate]);
-    if (check.rows.length === 0) break;
-    nextNum++;
-    candidate = `${prefix}-${String(nextNum).padStart(4, '0')}`;
-  }
-
-  return candidate;
+function branchIdFor(client, explicitBranchId) {
+  const id = Number(client.branchId || branchContext.getBranchStore()?.branchId || explicitBranchId || 1);
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error('Invalid branch ID');
+  return id;
 }
 
-/**
- * Generates the next sequential invoice number (e.g. SAL-00001, VPU-00001, CPU-00001, EXC-00001, RPR-2026-00001)
- */
-async function getNextInvoiceNo(typeKey, client = db) {
-  const map = {
-    sale: 'SAL',
-    vendor_purchase: 'VPU',
-    customer_purchase: 'CPU',
-    exchange: 'EXC',
-    repair: 'RPR',
-    diagnosis: 'DIA'
-  };
-  const prefix = map[typeKey] || 'INV';
-
-  const res = await client.query(
-    `SELECT invoice_no FROM invoices WHERE invoice_no ILIKE $1`,
-    [`${prefix}-%`]
-  );
-
-  let maxNum = 0;
-  for (const row of res.rows) {
-    const parts = String(row.invoice_no).split('-');
-    const numPart = parseInt(parts[parts.length - 1], 10);
-    if (!isNaN(numPart) && numPart > maxNum) {
-      maxNum = numPart;
-    }
-  }
-
-  let nextNum = maxNum + 1;
-  let candidate = `${prefix}-${String(nextNum).padStart(5, '0')}`;
-
-  while (true) {
-    const check = await client.query('SELECT 1 FROM invoices WHERE invoice_no = $1', [candidate]);
-    if (check.rows.length === 0) break;
-    nextNum++;
-    candidate = `${prefix}-${String(nextNum).padStart(5, '0')}`;
-  }
-
-  return candidate;
+// One atomic UPSERT reserves the number. MAX+1 alone races with another request.
+async function reserveNumber(client, branchId, key, floor) {
+  const result = await client.query(`
+    INSERT INTO branch_counters(branch_id,key,value) VALUES ($1,$2,$3)
+    ON CONFLICT(branch_id,key) DO UPDATE
+      SET value=GREATEST(branch_counters.value+1,EXCLUDED.value)
+    RETURNING value`, [branchId,key,floor.toString()]);
+  return BigInt(result.rows[0].value);
 }
 
-/**
- * Generates next repair tracking ID (e.g. RPR-10001, RPR-10002)
- * Clean, readable 5-digit format: Branch 1 uses 10000 series, Branch 2 uses 20000 series.
- */
-async function getNextTrackingId(client = db) {
-  const branchContext = require('../middleware/branchContext');
-  const store = branchContext.getBranchStore();
-  const branchId = store?.branchId || 1;
-  const prefix = 'RPR';
-  const baseOffset = branchId === 2 ? 20000 : 10000;
-
-  const res = await client.query(
-    `SELECT tracking_id FROM repair_jobs WHERE tracking_id ILIKE 'RPR-%' OR tracking_id ILIKE '%-RPR-%'`
-  );
-
-  let maxNum = baseOffset;
-  for (const row of res.rows) {
-    const parts = String(row.tracking_id).split('-');
-    const lastPart = parts[parts.length - 1];
-    const numPart = parseInt(lastPart, 10);
-    if (!isNaN(numPart) && numPart >= baseOffset && numPart < baseOffset + 10000 && numPart > maxNum) {
-      maxNum = numPart;
-    }
+async function nextBusinessCode(client, branchId, table, column, prefix, width, floor = 1n) {
+  // Identifiers come only from fixed callers below, never from request data.
+  const existing = await client.query(`SELECT ${column} AS code FROM ${table} WHERE branch_id=$1`,[branchId]);
+  for (const row of existing.rows) {
+    const value=String(row.code);
+    if (!value.startsWith(prefix+'-')) continue;
+    const suffix=value.slice(prefix.length+1);
+    if (/^\d+$/.test(suffix)) floor = floor > BigInt(suffix) ? floor : BigInt(suffix)+1n;
   }
-
-  let nextNum = maxNum + 1;
-  let candidate = `${prefix}-${nextNum}`;
-
-  while (true) {
-    const check = await client.query('SELECT 1 FROM repair_jobs WHERE tracking_id = $1', [candidate]);
-    if (check.rows.length === 0) break;
-    nextNum++;
-    candidate = `${prefix}-${nextNum}`;
-  }
-
-  return candidate;
+  const n=await reserveNumber(client,branchId,table+':'+prefix,floor);
+  return prefix+'-'+n.toString().padStart(width,'0');
 }
 
-/**
- * Generates next ID with prefix (e.g., CUS-0001, VND-0001, ACC-0001, PAY-00001, EXP-00001, HLD-00001, SRV-0001)
- */
+async function getNextProductCode(categoryId, client = db, explicitBranchId = null) {
+  const branchId=branchIdFor(client,explicitBranchId);
+  let prefix='PRD';
+  if(categoryId) {
+    const result=await client.query('SELECT code_prefix,name FROM product_categories WHERE id=$1',[categoryId]);
+    if(result.rows.length) prefix=result.rows[0].code_prefix || String(result.rows[0].name).replace(/[^A-Za-z]/g,'').slice(0,3).toUpperCase() || 'PRD';
+  }
+  return nextBusinessCode(client,branchId,'products','code',prefix,4);
+}
+
+async function getNextInvoiceNo(typeKey, client = db, explicitBranchId = null) {
+  const prefixes={sale:'SAL',vendor_purchase:'VPU',customer_purchase:'CPU',exchange:'EXC',repair:'RPR',diagnosis:'DIA'};
+  return nextBusinessCode(client,branchIdFor(client,explicitBranchId),'invoices','invoice_no',prefixes[typeKey] || 'INV',5);
+}
+
+async function getNextTrackingId(client = db, explicitBranchId = null) {
+  const branchId=branchIdFor(client,explicitBranchId);
+  return nextBusinessCode(client,branchId,'repair_jobs','tracking_id','RPR',5,BigInt(branchId)*10000n+1n);
+}
+
 async function getNextEntityId(table, idColumn, prefix, padLength = 4, client = db) {
-  const res = await client.query(
-    `SELECT ${idColumn} as entity_id FROM ${table} WHERE ${idColumn} ILIKE $1`,
-    [`${prefix}-%`]
-  );
-
-  let maxNum = 0;
-  for (const row of res.rows) {
-    const parts = String(row.entity_id).split('-');
-    const numPart = parseInt(parts[parts.length - 1], 10);
-    if (!isNaN(numPart) && numPart > maxNum) {
-      maxNum = numPart;
-    }
-  }
-
-  let nextNum = maxNum + 1;
-  let candidate = `${prefix}-${String(nextNum).padStart(padLength, '0')}`;
-
-  while (true) {
-    const check = await client.query(`SELECT 1 FROM ${table} WHERE ${idColumn} = $1`, [candidate]);
-    if (check.rows.length === 0) break;
-    nextNum++;
-    candidate = `${prefix}-${String(nextNum).padStart(padLength, '0')}`;
-  }
-
-  return candidate;
+  // Checks collisions across all branches, including imported IDs ahead of the sequence.
+  const result=await client.query('SELECT public.retail_next_entity_id($1,$2,$3,$4) AS id',[table,idColumn,prefix,padLength]);
+  return result.rows[0].id;
 }
 
-module.exports = {
-  getNextProductCode,
-  getNextInvoiceNo,
-  getNextTrackingId,
-  getNextEntityId
-};
+module.exports={getNextProductCode,getNextInvoiceNo,getNextTrackingId,getNextEntityId};

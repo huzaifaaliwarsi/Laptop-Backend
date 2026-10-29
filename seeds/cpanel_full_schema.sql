@@ -3,6 +3,10 @@
 -- =============================================================================
 
 -- 1. USERS & AUTHENTICATION
+DROP TABLE IF EXISTS master_super_admins CASCADE;
+DROP TABLE IF EXISTS master_audit_logs CASCADE;
+DROP TABLE IF EXISTS master_staff_identities CASCADE;
+DROP TABLE IF EXISTS master_branches CASCADE;
 DROP TABLE IF EXISTS audit_logs CASCADE;
 DROP TABLE IF EXISTS whatsapp_messages CASCADE;
 DROP TABLE IF EXISTS whatsapp_conversations CASCADE;
@@ -34,6 +38,70 @@ DROP TABLE IF EXISTS accessory_categories CASCADE;
 DROP TABLE IF EXISTS product_categories CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
 
+
+-- 0. MASTER BRANCHES & SINGLE SHARED DB INFRASTRUCTURE
+CREATE TABLE IF NOT EXISTS master_branches (
+    id SERIAL PRIMARY KEY,
+    branch_code VARCHAR(50) NOT NULL UNIQUE,
+    branch_name VARCHAR(150) NOT NULL,
+    db_name VARCHAR(100),
+    db_host VARCHAR(150),
+    db_port INT DEFAULT 5432,
+    db_user VARCHAR(100),
+    db_password_encrypted TEXT,
+    db_connection_url_encrypted TEXT,
+    db_ssl BOOLEAN DEFAULT TRUE,
+    status VARCHAR(50) DEFAULT 'Active',
+    phone VARCHAR(50),
+    email VARCHAR(100),
+    address TEXT,
+    city VARCHAR(100),
+    admin_name VARCHAR(100),
+    admin_username VARCHAR(100),
+    admin_password_encrypted TEXT,
+    schema_version VARCHAR(20) DEFAULT '2.1.0',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS master_super_admins (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    name VARCHAR(150),
+    email VARCHAR(150),
+    status VARCHAR(50) DEFAULT 'Active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS master_audit_logs (
+    id SERIAL PRIMARY KEY,
+    branch_id INT,
+    action VARCHAR(100) NOT NULL,
+    details JSONB,
+    performed_by VARCHAR(150),
+    ip_address VARCHAR(100),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS master_staff_identities (
+    id SERIAL PRIMARY KEY,
+    branch_id INT NOT NULL REFERENCES master_branches(id) ON DELETE CASCADE,
+    branch_user_id VARCHAR(50),
+    normalized_username VARCHAR(100) NOT NULL,
+    normalized_phone VARCHAR(50),
+    role VARCHAR(50) NOT NULL,
+    status VARCHAR(50) DEFAULT 'Active',
+    reservation_token VARCHAR(100),
+    reservation_status VARCHAR(50) DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_master_branches_code ON master_branches(branch_code);
+CREATE INDEX IF NOT EXISTS idx_master_staff_identities_branch ON master_staff_identities(branch_id);
+
 CREATE TABLE users (
     id VARCHAR(50) PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -43,6 +111,7 @@ CREATE TABLE users (
     username VARCHAR(100) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
     status VARCHAR(50) DEFAULT 'Active' CHECK (status IN ('Active', 'Inactive')),
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -76,13 +145,15 @@ CREATE TABLE repair_categories (
 
 CREATE TABLE repair_services (
     id VARCHAR(50) PRIMARY KEY,
-    code VARCHAR(50) UNIQUE NOT NULL,
+    code VARCHAR(50) NOT NULL,
     name VARCHAR(255) NOT NULL,
     charges NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
     duration VARCHAR(100),
     conditions TEXT,
     status VARCHAR(50) DEFAULT 'Active' CHECK (status IN ('Active', 'Inactive')),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    branch_id INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_repair_services_branch_code UNIQUE (branch_id, code)
 );
 
 CREATE TABLE expense_categories (
@@ -98,6 +169,7 @@ CREATE TABLE customers (
     contact VARCHAR(50),
     address TEXT,
     notes TEXT,
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -111,6 +183,7 @@ CREATE TABLE vendors (
     contact VARCHAR(50),
     address TEXT,
     notes TEXT,
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -121,7 +194,7 @@ CREATE INDEX idx_vendors_contact ON vendors(contact);
 -- 4. PRODUCTS & INVENTORY
 CREATE TABLE products (
     id VARCHAR(50) PRIMARY KEY,
-    code VARCHAR(50) UNIQUE NOT NULL,
+    code VARCHAR(50) NOT NULL,
     inventory_type VARCHAR(50) NOT NULL CHECK (inventory_type IN ('Vendor Purchased', 'Customer Purchased')),
     category_id INT REFERENCES product_categories(id) ON DELETE RESTRICT,
     category_name VARCHAR(100) NOT NULL,
@@ -152,7 +225,9 @@ CREATE TABLE products (
     source_name VARCHAR(255),
     purchase_invoice_no VARCHAR(100),
     date_added DATE DEFAULT CURRENT_DATE,
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_products_branch_code UNIQUE (branch_id, code),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -171,6 +246,7 @@ CREATE TABLE inventory_movements (
     reference_id VARCHAR(100),
     performed_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     date DATE NOT NULL DEFAULT CURRENT_DATE,
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -180,7 +256,7 @@ CREATE INDEX idx_inventory_movements_date ON inventory_movements(date);
 -- 5. INVOICES & POS
 CREATE TABLE invoices (
     id VARCHAR(50) PRIMARY KEY,
-    invoice_no VARCHAR(100) UNIQUE NOT NULL,
+    invoice_no VARCHAR(100) NOT NULL,
     type VARCHAR(100) NOT NULL,
     type_key VARCHAR(50) NOT NULL,
     date DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -209,7 +285,9 @@ CREATE TABLE invoices (
     repair_job_id VARCHAR(50),
     created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     created_by_name VARCHAR(255),
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_invoices_branch_no UNIQUE (branch_id, invoice_no),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -244,6 +322,7 @@ CREATE TABLE held_bills (
     payload JSONB NOT NULL,
     created_by VARCHAR(50) REFERENCES users(id) ON DELETE CASCADE,
     created_by_name VARCHAR(255),
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -261,6 +340,7 @@ CREATE TABLE accounts (
     remaining NUMERIC(18, 2) NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'Open' CHECK (status IN ('Open', 'Settled', 'Cancelled')),
     date DATE NOT NULL DEFAULT CURRENT_DATE,
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -287,6 +367,7 @@ CREATE TABLE payments (
     is_initial_settlement BOOLEAN DEFAULT FALSE,
     created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     created_by_name VARCHAR(255),
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -323,13 +404,14 @@ CREATE TABLE vendor_returns (
     status VARCHAR(50) NOT NULL DEFAULT 'Unpaid',
     created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     created_by_name VARCHAR(255),
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 7. REPAIR OPERATIONS & TECHNICIAN WORKSTATION
 CREATE TABLE repair_jobs (
     id VARCHAR(50) PRIMARY KEY,
-    tracking_id VARCHAR(100) UNIQUE NOT NULL,
+    tracking_id VARCHAR(100) NOT NULL,
     job_type VARCHAR(50) NOT NULL CHECK (job_type IN ('Service Job', 'Diagnosis Job')),
     origin_job_type VARCHAR(50),
     date DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -372,7 +454,9 @@ CREATE TABLE repair_jobs (
     invoice_id VARCHAR(50),
     created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     created_by_name VARCHAR(255),
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_repair_jobs_branch_tracking UNIQUE (branch_id, tracking_id),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -448,6 +532,7 @@ CREATE TABLE expenses (
     linked_tracking_id VARCHAR(100),
     created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     created_by_name VARCHAR(255),
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -523,6 +608,7 @@ CREATE TABLE audit_logs (
     entity_id VARCHAR(100),
     details JSONB DEFAULT '{}',
     ip_address VARCHAR(50),
+    branch_id INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

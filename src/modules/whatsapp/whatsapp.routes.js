@@ -266,7 +266,7 @@ async function processBotReply(input, conv, client = db) {
   }
 
   if (t === '5' || t.includes('location') || t.includes('address')) {
-    const setRes = await client.query('SELECT shop_location FROM whatsapp_settings WHERE id = 1');
+    const setRes = await client.query('SELECT shop_location FROM whatsapp_settings WHERE TRUE');
     const loc = setRes.rows.length > 0 ? setRes.rows[0].shop_location : null;
     return `📍 *Shop Location:*\n${loc || 'Main Boulevard Computer Plaza, Lahore.'}\n\n🕒 *Timings:* Mon - Sat (11:00 AM - 9:00 PM)`;
   }
@@ -276,7 +276,7 @@ async function processBotReply(input, conv, client = db) {
     return '🙋‍♂️ *Human Agent Requested*\n\nOur customer support representative has been notified and will reply to you here shortly.';
   }
 
-  const welcomeRes = await client.query('SELECT welcome_message FROM whatsapp_settings WHERE id = 1');
+  const welcomeRes = await client.query('SELECT welcome_message FROM whatsapp_settings WHERE TRUE');
   const customWelcome = welcomeRes.rows.length > 0 && welcomeRes.rows[0].welcome_message ? welcomeRes.rows[0].welcome_message : null;
 
   return (customWelcome || 
@@ -293,7 +293,7 @@ async function processBotReply(input, conv, client = db) {
 // GET /api/whatsapp/settings
 router.get('/settings', async (req, res, next) => {
   try {
-    const result = await db.query('SELECT * FROM whatsapp_settings WHERE id = 1');
+    const result = await db.query('SELECT * FROM whatsapp_settings WHERE TRUE');
     return res.json({
       success: true,
       data: result.rows[0] || {}
@@ -321,7 +321,7 @@ router.put('/settings', async (req, res, next) => {
         shop_location = COALESCE($9, shop_location),
         auto_invoice_whatsapp = COALESCE($10, auto_invoice_whatsapp),
         updated_at = CURRENT_TIMESTAMP
-       WHERE id = 1
+       WHERE TRUE
        RETURNING *`,
       [connected, number, businessName, botEnabled, humanHandoff, salesAccess, autoStatusNotifications, welcomeMessage, shopLocation, autoInvoiceWhatsapp]
     );

@@ -62,6 +62,8 @@ class InvoiceService {
         throw error;
       }
 
+      const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
+
       // Ensure customer exists
       let customerId = reqCustId;
       const cleanName = customerName.trim();
@@ -69,21 +71,21 @@ class InvoiceService {
 
       if (!customerId) {
         const custRes = await client.query(
-          `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2)`,
-          [cleanName, cleanContact]
+          `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2) AND branch_id = $3`,
+          [cleanName, cleanContact, branchId]
         );
         if (custRes.rows.length > 0) {
           customerId = custRes.rows[0].id;
         } else {
           customerId = await getNextEntityId('customers', 'id', 'CUS', 4, client);
           await client.query(
-            `INSERT INTO customers (id, name, contact) VALUES ($1, $2, $3)`,
-            [customerId, cleanName, cleanContact]
+            `INSERT INTO customers (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)`,
+            [customerId, cleanName, cleanContact, branchId]
           );
         }
       }
 
-      const invoiceNo = await getNextInvoiceNo('sale', client);
+      const invoiceNo = await getNextInvoiceNo('sale', client, branchId);
       const invoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
 
       let productTotal = 0;
@@ -233,18 +235,18 @@ class InvoiceService {
       // Insert invoice
       const invoiceRes = await client.query(
         `INSERT INTO invoices (
-          id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
+          id, branch_id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
           product_total, service_total, total, paid, initial_paid, balance, payment_method,
           reference_id, payment_status, is_voided, created_by, created_by_name
         ) VALUES (
-          $1, $2, 'Sales Invoice', 'sale', $3, 'Customer', $4, $5, $6,
+          $1, $17, $2, 'Sales Invoice', 'sale', $3, 'Customer', $4, $5, $6,
           $7, $8, $9, $10, $10, $11, $12,
           $13, $14, FALSE, $15, $16
         ) RETURNING *`,
         [
           invoiceId, invoiceNo, date || new Date(), customerId, cleanName, cleanContact,
           productTotal, serviceTotal, total, paid, balance, pMethod,
-          referenceId ? referenceId.trim() : null, payStatus, creator.id, creator.name
+          referenceId ? referenceId.trim() : null, payStatus, creator.id, creator.name, branchId
         ]
       );
 
@@ -267,17 +269,17 @@ class InvoiceService {
         const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
         await client.query(
           `INSERT INTO payments (
-            id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+            id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
             direction, amount, date, payment_method, reference_id, notes, affects_money,
             is_initial_settlement, created_by, created_by_name
           ) VALUES (
-            $1, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
+            $1, $12, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
             'Received', $6, $7, $8, $9, 'Initial POS sales payment', TRUE,
             TRUE, $10, $11
           )`,
           [
             payId, invoiceId, invoiceNo, customerId, cleanName,
-            paid, date || new Date(), pMethod, referenceId || null, creator.id, creator.name
+            paid, date || new Date(), pMethod, referenceId || null, creator.id, creator.name, branchId
           ]
         );
       }
@@ -287,10 +289,10 @@ class InvoiceService {
         const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
         await client.query(
           `INSERT INTO accounts (
-            id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+            id, branch_id, type, party_type, party_id, party_name, invoice_id, invoice_no,
             amount, remaining, status, date
-          ) VALUES ($1, 'Customer Receivable', 'Customer', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
-          [accId, customerId, cleanName, invoiceId, invoiceNo, balance, balance, date || new Date()]
+          ) VALUES ($1, $9, 'Customer Receivable', 'Customer', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
+          [accId, customerId, cleanName, invoiceId, invoiceNo, balance, balance, date || new Date(), branchId]
         );
       }
 
@@ -337,6 +339,8 @@ class InvoiceService {
         throw error;
       }
 
+      const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
+
       let vendorId = reqVndId;
       const cleanName = vendorName.trim();
       const rawContact = purchaseData.vendorContact || purchaseData.contact;
@@ -344,16 +348,16 @@ class InvoiceService {
 
       if (!vendorId) {
         const vndRes = await client.query(
-          `SELECT id FROM vendors WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2)`,
-          [cleanName, cleanContact]
+          `SELECT id FROM vendors WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2) AND branch_id = $3`,
+          [cleanName, cleanContact, branchId]
         );
         if (vndRes.rows.length > 0) {
           vendorId = vndRes.rows[0].id;
         } else {
           vendorId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
           await client.query(
-            `INSERT INTO vendors (id, name, contact) VALUES ($1, $2, $3)`,
-            [vendorId, cleanName, cleanContact]
+            `INSERT INTO vendors (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)`,
+            [vendorId, cleanName, cleanContact, branchId]
           );
         }
       }
@@ -365,28 +369,28 @@ class InvoiceService {
 
       // Check available cash/online balance if paid > 0
       if (paid > 0) {
-        await validateOutflow(pMethod, paid, 'Vendor Purchase Payment', client);
+        await validateOutflow(pMethod, paid, 'Vendor Purchase Payment', client, branchId);
       }
 
-      const invoiceNo = await getNextInvoiceNo('vendor_purchase', client);
+      const invoiceNo = await getNextInvoiceNo('vendor_purchase', client, branchId);
       const invoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
       const payStatus = paymentStatus(total, paid);
       const creator = getCreator(user);
 
       const invoiceRes = await client.query(
         `INSERT INTO invoices (
-          id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
+          id, branch_id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
           product_total, service_total, total, paid, initial_paid, balance, payment_method,
           reference_id, payment_status, is_voided, created_by, created_by_name
         ) VALUES (
-          $1, $2, 'Vendor Purchase', 'vendor_purchase', $3, 'Vendor', $4, $5, $6,
+          $1, $17, $2, 'Vendor Purchase', 'vendor_purchase', $3, 'Vendor', $4, $5, $6,
           $7, 0, $8, $9, $10, $11, $12,
           $13, $14, FALSE, $15, $16
         ) RETURNING *`,
         [
           invoiceId, invoiceNo, date || new Date(), vendorId, cleanName, cleanContact,
           total, total, paid, paid, balance, pMethod,
-          referenceId || null, payStatus, creator.id, creator.name
+          referenceId || null, payStatus, creator.id, creator.name, branchId
         ]
       );
 
@@ -401,6 +405,7 @@ class InvoiceService {
           refType: 'Vendor Purchase',
           refId: invoiceId
         };
+        line.branchId = branchId;
         const mergeResult = await InventoryService.addOrMergeProduct(line, sourceData, user, client);
         const qty = parseInt(line.quantity || 1, 10);
         const costPrice = parseFloat(line.costPrice || 0);
@@ -425,17 +430,17 @@ class InvoiceService {
         const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
         await client.query(
           `INSERT INTO payments (
-            id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+            id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
             direction, amount, date, payment_method, reference_id, notes, affects_money,
             is_initial_settlement, created_by, created_by_name
           ) VALUES (
-            $1, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
+            $1, $12, $2, $3, 'Vendor', $4, $5, 'Vendor Payable',
             'Paid', $6, $7, $8, $9, 'Initial vendor purchase payment', TRUE,
             TRUE, $10, $11
           )`,
           [
             payId, invoiceId, invoiceNo, vendorId, cleanName,
-            paid, date || new Date(), pMethod, referenceId || null, creator.id, creator.name
+            paid, date || new Date(), pMethod, referenceId || null, creator.id, creator.name, branchId
           ]
         );
       }
@@ -444,10 +449,10 @@ class InvoiceService {
         const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
         await client.query(
           `INSERT INTO accounts (
-            id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+            id, branch_id, type, party_type, party_id, party_name, invoice_id, invoice_no,
             amount, remaining, status, date
-          ) VALUES ($1, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
-          [accId, vendorId, cleanName, invoiceId, invoiceNo, balance, balance, date || new Date()]
+          ) VALUES ($1, $9, 'Vendor Payable', 'Vendor', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
+          [accId, vendorId, cleanName, invoiceId, invoiceNo, balance, balance, date || new Date(), branchId]
         );
       }
 
@@ -494,6 +499,8 @@ class InvoiceService {
         throw error;
       }
 
+      const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
+
       let customerId = reqCustId;
       const cleanName = customerName.trim();
       const rawContact = purchaseData.customerContact || purchaseData.contact;
@@ -501,16 +508,16 @@ class InvoiceService {
 
       if (!customerId) {
         const custRes = await client.query(
-          `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2)`,
-          [cleanName, cleanContact]
+          `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2) AND branch_id = $3`,
+          [cleanName, cleanContact, branchId]
         );
         if (custRes.rows.length > 0) {
           customerId = custRes.rows[0].id;
         } else {
           customerId = await getNextEntityId('customers', 'id', 'CUS', 4, client);
           await client.query(
-            `INSERT INTO customers (id, name, contact) VALUES ($1, $2, $3)`,
-            [customerId, cleanName, cleanContact]
+            `INSERT INTO customers (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)`,
+            [customerId, cleanName, cleanContact, branchId]
           );
         }
       }
@@ -521,27 +528,27 @@ class InvoiceService {
       const pMethod = paymentMethod || 'Cash';
 
       if (paid > 0) {
-        await validateOutflow(pMethod, paid, 'Customer Purchase Payment', client);
+        await validateOutflow(pMethod, paid, 'Customer Purchase Payment', client, branchId);
       }
 
-      const invoiceNo = await getNextInvoiceNo('customer_purchase', client);
+      const invoiceNo = await getNextInvoiceNo('customer_purchase', client, branchId);
       const invoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
       const payStatus = paymentStatus(total, paid);
 
       const invoiceRes = await client.query(
         `INSERT INTO invoices (
-          id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
+          id, branch_id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
           product_total, service_total, total, paid, initial_paid, balance, payment_method,
           reference_id, payment_status, is_voided, created_by, created_by_name
         ) VALUES (
-          $1, $2, 'Customer Purchase', 'customer_purchase', $3, 'Customer', $4, $5, $6,
+          $1, $17, $2, 'Customer Purchase', 'customer_purchase', $3, 'Customer', $4, $5, $6,
           $7, 0, $8, $9, $10, $11, $12,
           $13, $14, FALSE, $15, $16
         ) RETURNING *`,
         [
           invoiceId, invoiceNo, date || new Date(), customerId, cleanName, cleanContact,
           total, total, paid, paid, balance, pMethod,
-          referenceId || null, payStatus, user.id, user.name
+          referenceId || null, payStatus, user.id, user.name, branchId
         ]
       );
 
@@ -556,6 +563,7 @@ class InvoiceService {
           refType: 'Customer Purchase',
           refId: invoiceId
         };
+        line.branchId = branchId;
         const mergeResult = await InventoryService.addOrMergeProduct(line, sourceData, user, client);
         const qty = parseInt(line.quantity || 1, 10);
         const costPrice = parseFloat(line.costPrice || 0);
@@ -580,17 +588,17 @@ class InvoiceService {
         const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
         await client.query(
           `INSERT INTO payments (
-            id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+            id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
             direction, amount, date, payment_method, reference_id, notes, affects_money,
             is_initial_settlement, created_by, created_by_name
           ) VALUES (
-            $1, $2, $3, 'Customer', $4, $5, 'Customer Payable',
+            $1, $12, $2, $3, 'Customer', $4, $5, 'Customer Payable',
             'Paid', $6, $7, $8, $9, 'Initial customer purchase payment', TRUE,
             TRUE, $10, $11
           )`,
           [
             payId, invoiceId, invoiceNo, customerId, cleanName,
-            paid, date || new Date(), pMethod, referenceId || null, user.id, user.name
+            paid, date || new Date(), pMethod, referenceId || null, user.id, user.name, branchId
           ]
         );
       }
@@ -599,10 +607,10 @@ class InvoiceService {
         const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
         await client.query(
           `INSERT INTO accounts (
-            id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+            id, branch_id, type, party_type, party_id, party_name, invoice_id, invoice_no,
             amount, remaining, status, date
-          ) VALUES ($1, 'Customer Payable', 'Customer', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
-          [accId, customerId, cleanName, invoiceId, invoiceNo, balance, balance, date || new Date()]
+          ) VALUES ($1, $9, 'Customer Payable', 'Customer', $2, $3, $4, $5, $6, $7, 'Open', $8)`,
+          [accId, customerId, cleanName, invoiceId, invoiceNo, balance, balance, date || new Date(), branchId]
         );
       }
 
@@ -669,6 +677,8 @@ class InvoiceService {
         throw error;
       }
 
+      const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
+
       let customerId = reqCustId;
       const cleanName = customerName.trim();
       const rawContact = contact || exchangeData.customerContact;
@@ -676,14 +686,14 @@ class InvoiceService {
 
       if (!customerId) {
         const custRes = await client.query(
-          `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2)`,
-          [cleanName, cleanContact]
+          `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2) AND branch_id = $3`,
+          [cleanName, cleanContact, branchId]
         );
         if (custRes.rows.length > 0) {
           customerId = custRes.rows[0].id;
         } else {
           customerId = await getNextEntityId('customers', 'id', 'CUS', 4, client);
-          await client.query(`INSERT INTO customers (id, name, contact) VALUES ($1, $2, $3)`, [customerId, cleanName, cleanContact]);
+          await client.query(`INSERT INTO customers (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)`, [customerId, cleanName, cleanContact, branchId]);
         }
       }
 
@@ -709,10 +719,10 @@ class InvoiceService {
       const pMethod = paymentMethod || 'Cash';
 
       if (exchangeCase === 'Shop Pays Customer' && paid > 0) {
-        await validateOutflow(pMethod, paid, 'Exchange Payment to Customer', client);
+        await validateOutflow(pMethod, paid, 'Exchange Payment to Customer', client, branchId);
       }
 
-      const invoiceNo = await getNextInvoiceNo('exchange', client);
+      const invoiceNo = await getNextInvoiceNo('exchange', client, branchId);
       const invoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
       const payStatus = paymentStatus(difference, paid, exchangeCase === 'Even Exchange');
 
@@ -738,23 +748,24 @@ class InvoiceService {
         refType: 'Exchange Invoice',
         refId: invoiceId
       };
+      receivedProduct.branchId = branchId;
       const recResult = await InventoryService.addOrMergeProduct(receivedProduct, sourceData, user, client);
 
       // Create exchange invoice
       const invoiceRes = await client.query(
         `INSERT INTO invoices (
-          id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
+          id, branch_id, invoice_no, type, type_key, date, party_type, party_id, party_name, contact,
           exchange_case, product_total, service_total, total, paid, initial_paid, balance,
           payment_method, reference_id, payment_status, is_voided, created_by, created_by_name
         ) VALUES (
-          $1, $2, 'Exchange Invoice', 'exchange', $3, 'Customer', $4, $5, $6,
+          $1, $18, $2, 'Exchange Invoice', 'exchange', $3, 'Customer', $4, $5, $6,
           $7, $8, 0, $9, $10, $11, $12,
           $13, $14, $15, FALSE, $16, $17
         ) RETURNING *`,
         [
           invoiceId, invoiceNo, date || new Date(), customerId, cleanName, cleanContact,
           exchangeCase, difference, difference, paid, paid, balance,
-          pMethod, referenceId || null, payStatus, user.id, user.name
+          pMethod, referenceId || null, payStatus, user.id, user.name, branchId
         ]
       );
 
@@ -788,17 +799,17 @@ class InvoiceService {
 
         await client.query(
           `INSERT INTO payments (
-            id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+            id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
             direction, amount, date, payment_method, reference_id, notes, affects_money,
             is_initial_settlement, created_by, created_by_name
           ) VALUES (
-            $1, $2, $3, 'Customer', $4, $5, $6,
+            $1, $14, $2, $3, 'Customer', $4, $5, $6,
             $7, $8, $9, $10, $11, 'Initial exchange settlement', TRUE,
             TRUE, $12, $13
           )`,
           [
             payId, invoiceId, invoiceNo, customerId, cleanName, accountType,
-            direction, paid, date || new Date(), pMethod, referenceId || null, user.id, user.name
+            direction, paid, date || new Date(), pMethod, referenceId || null, user.id, user.name, branchId
           ]
         );
       }
@@ -808,10 +819,10 @@ class InvoiceService {
         const accType = exchangeCase === 'Customer Pays Shop' ? 'Customer Receivable' : 'Customer Payable';
         await client.query(
           `INSERT INTO accounts (
-            id, type, party_type, party_id, party_name, invoice_id, invoice_no,
+            id, branch_id, type, party_type, party_id, party_name, invoice_id, invoice_no,
             amount, remaining, status, date
-          ) VALUES ($1, $2, 'Customer', $3, $4, $5, $6, $7, $8, 'Open', $9)`,
-          [accId, accType, customerId, cleanName, invoiceId, invoiceNo, balance, balance, date || new Date()]
+          ) VALUES ($1, $10, $2, 'Customer', $3, $4, $5, $6, $7, $8, 'Open', $9)`,
+          [accId, accType, customerId, cleanName, invoiceId, invoiceNo, balance, balance, date || new Date(), branchId]
         );
       }
 
@@ -867,6 +878,7 @@ class InvoiceService {
       const rMethod = refundMethod || 'Cash';
 
       const invType = invoice.type || invoice.type_key;
+      const branchId = invoice.branch_id || user?.branchId || 1;
 
       if (invType === 'Customer Purchase') {
         // Customer Purchase / Buyback: items were added to stock, so voiding removes them from stock
@@ -890,17 +902,17 @@ class InvoiceService {
           const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
           await client.query(
             `INSERT INTO payments (
-              id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+              id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
               direction, amount, date, payment_method, reference_id, notes, affects_money,
               is_initial_settlement, created_by, created_by_name
             ) VALUES (
-              $1, $2, $3, 'Customer', $4, $5, 'Customer Refund',
+              $1, $13, $2, $3, 'Customer', $4, $5, 'Customer Refund',
               'Received', $6, $7, $8, $9, $10, TRUE, FALSE, $11, $12
             )`,
             [
               payId, invoice.id, invoice.invoice_no, invoice.party_id, invoice.party_name,
               refundAmount, date || new Date(), rMethod, referenceId ? referenceId.trim() : null,
-              `Customer Buyback Reversal / Void: ${reason.trim()}`, user.id, user.name
+              `Customer Buyback Reversal / Void: ${reason.trim()}`, user.id, user.name, branchId
             ]
           );
         }
@@ -955,8 +967,8 @@ class InvoiceService {
 
         // Cancel open customer receivable
         await client.query(
-          `UPDATE accounts SET status = 'Cancelled', remaining = 0 WHERE invoice_id = $1 AND status = 'Open'`,
-          [id]
+          `UPDATE accounts SET status = 'Cancelled', remaining = 0 WHERE invoice_id = $1 AND status = 'Open' AND branch_id = $2`,
+          [id, branchId]
         );
 
         // Record refund payout in payments table if refund given
@@ -964,17 +976,17 @@ class InvoiceService {
           const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
           await client.query(
             `INSERT INTO payments (
-              id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
+              id, branch_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
               direction, amount, date, payment_method, reference_id, notes, affects_money,
               is_initial_settlement, created_by, created_by_name
             ) VALUES (
-              $1, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
+              $1, $13, $2, $3, 'Customer', $4, $5, 'Customer Receivable',
               'Paid', $6, $7, $8, $9, $10, TRUE, FALSE, $11, $12
             )`,
             [
               payId, invoice.id, invoice.invoice_no, invoice.party_id, invoice.party_name,
               refundAmount, date || new Date(), rMethod, referenceId ? referenceId.trim() : null,
-              `Sales Void Refund: ${reason.trim()}`, user.id, user.name
+              `Sales Void Refund: ${reason.trim()}`, user.id, user.name, branchId
             ]
           );
         }
@@ -1037,6 +1049,7 @@ class InvoiceService {
         throw error;
       }
       const product = prodRes.rows[0];
+      const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
 
       if (qty > product.current_stock) {
         const error = new Error(`Only ${product.current_stock} unit(s) available in stock to return.`);
@@ -1050,17 +1063,17 @@ class InvoiceService {
       const vendorName = reqVndName || returnData.vendor_name || product.source_name;
 
       if (vendorId) {
-        const vndRes = await client.query('SELECT id, name FROM vendors WHERE id = $1', [vendorId]);
+        const vndRes = await client.query('SELECT id, name FROM vendors WHERE id = $1 AND branch_id = $2', [vendorId, branchId]);
         if (vndRes.rows.length > 0) vendor = vndRes.rows[0];
       }
       if (!vendor && vendorName && String(vendorName).trim() !== '' && String(vendorName).trim() !== 'Manual Entry') {
-        const vndRes = await client.query('SELECT id, name FROM vendors WHERE LOWER(name) = LOWER($1)', [String(vendorName).trim()]);
+        const vndRes = await client.query('SELECT id, name FROM vendors WHERE LOWER(name) = LOWER($1) AND branch_id = $2', [String(vendorName).trim(), branchId]);
         if (vndRes.rows.length > 0) {
           vendor = vndRes.rows[0];
           vendorId = vendor.id;
         } else {
           vendorId = await getNextEntityId('vendors', 'id', 'VND', 4, client);
-          await client.query('INSERT INTO vendors (id, name) VALUES ($1, $2)', [vendorId, String(vendorName).trim()]);
+          await client.query('INSERT INTO vendors (id, name, branch_id) VALUES ($1, $2, $3)', [vendorId, String(vendorName).trim(), branchId]);
           vendor = { id: vendorId, name: String(vendorName).trim() };
         }
       }
@@ -1137,6 +1150,7 @@ class InvoiceService {
               refType: 'Vendor Return',
               refId: returnId
             };
+            replacementProductData.branchId = branchId;
             const repRes = await InventoryService.addOrMergeProduct(replacementProductData, sourceData, user, client);
             repProduct = repRes.product;
           }
@@ -1156,25 +1170,25 @@ class InvoiceService {
                 INSERT INTO payments (
                   id, account_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
                   direction, amount, date, payment_method, reference_id, notes, affects_money,
-                  is_initial_settlement, created_by, created_by_name
+                  is_initial_settlement, created_by, created_by_name, branch_id
                 ) VALUES (
                   $1, NULL, NULL, $2, 'Vendor', $3, $4, 'Vendor Payable',
-                  'Paid', $5, $6, $7, $8, $9, TRUE, TRUE, $10, $11
+                  'Paid', $5, $6, $7, $8, $9, TRUE, TRUE, $10, $11, $12
                 )
               `, [
                 payId, returnId, vendor.id, vendor.name, priceDiff, date || new Date(),
                 diffMethod, referenceId || null,
                 `Upgrade difference paid to vendor for replacement (${repProduct?.code || ''})`,
-                user.id, user.name
+                user.id, user.name, branchId
               ]);
             } else {
               const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
               await client.query(`
                 INSERT INTO accounts (
                   id, type, party_type, party_id, party_name, invoice_id, invoice_no,
-                  amount, remaining, status, date
-                ) VALUES ($1, 'Vendor Payable', 'Vendor', $2, $3, NULL, $4, $5, $6, 'Open', $7)
-              `, [accId, vendor.id, vendor.name, returnId, priceDiff, priceDiff, date || new Date()]);
+                  amount, remaining, status, date, branch_id
+                ) VALUES ($1, 'Vendor Payable', 'Vendor', $2, $3, NULL, $4, $5, $6, 'Open', $7, $8)
+              `, [accId, vendor.id, vendor.name, returnId, priceDiff, priceDiff, date || new Date(), branchId]);
             }
           }
         } else {
@@ -1183,8 +1197,8 @@ class InvoiceService {
       } else if (method === 'Vendor Adjustment' || method === 'Vendor Payable Adjustment') {
         // Adjust against oldest open Vendor Payables
         const openPayables = await client.query(
-          `SELECT * FROM accounts WHERE party_id = $1 AND type = 'Vendor Payable' AND status = 'Open' ORDER BY date ASC FOR UPDATE`,
-          [vendor.id]
+          `SELECT * FROM accounts WHERE party_id = $1 AND type = 'Vendor Payable' AND status = 'Open' AND branch_id = $2 ORDER BY date ASC FOR UPDATE`,
+          [vendor.id, branchId]
         );
 
         let remainingToApply = initialSettlement;
@@ -1197,14 +1211,14 @@ class InvoiceService {
           const newStatus = newRem <= 0.005 ? 'Settled' : 'Open';
 
           await client.query(
-            `UPDATE accounts SET remaining = $1, status = $2 WHERE id = $3`,
-            [newRem, newStatus, acc.id]
+            `UPDATE accounts SET remaining = $1, status = $2 WHERE id = $3 AND branch_id = $4`,
+            [newRem, newStatus, acc.id, branchId]
           );
 
           if (acc.invoice_id) {
             await client.query(
-              `UPDATE invoices SET credit_adjusted = credit_adjusted + $1, balance = $2, payment_status = $3 WHERE id = $4`,
-              [applyAmt, newRem, newRem <= 0.005 ? 'Paid' : 'Partial', acc.invoice_id]
+              `UPDATE invoices SET credit_adjusted = credit_adjusted + $1, balance = $2, payment_status = $3 WHERE id = $4 AND branch_id = $5`,
+              [applyAmt, newRem, newRem <= 0.005 ? 'Paid' : 'Partial', acc.invoice_id, branchId]
             );
           }
 
@@ -1224,9 +1238,9 @@ class InvoiceService {
           payable_adjustment, replacement_mode, replacement_qty, replacement_product_id,
           replacement_product_code, replacement_product_name, replacement_product_cost_price,
           replacement_expected_sale_price, balance, payment_method, settlement_method,
-          reference_id, reason, date, status, created_by, created_by_name
+          reference_id, reason, date, status, created_by, created_by_name, branch_id
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
         ) RETURNING *`,
         [
           returnId, vendor.id, vendor.name, product.id, product.code,
@@ -1237,7 +1251,7 @@ class InvoiceService {
           repProduct ? parseFloat(repProduct.cost_price || 0) : 0,
           repProduct ? parseFloat(repProduct.expected_sale_price || 0) : 0,
           balance, method, method, referenceId ? referenceId.trim() : null,
-          reason ? reason.trim() : null, date || new Date(), retStatus, user.id, user.name
+          reason ? reason.trim() : null, date || new Date(), retStatus, user.id, user.name, branchId
         ]
       );
 
@@ -1246,8 +1260,8 @@ class InvoiceService {
       const linkedInvId = returnData.invoiceId;
       if (linkedInvId || (linkedInvNo && linkedInvNo !== 'MANUAL')) {
         const invLookup = await client.query(
-          `SELECT * FROM invoices WHERE id = $1 OR invoice_no = $2`,
-          [linkedInvId || null, linkedInvNo || null]
+          `SELECT * FROM invoices WHERE (id = $1 OR invoice_no = $2) AND branch_id = $3`,
+          [linkedInvId || null, linkedInvNo || null, branchId]
         );
         if (invLookup.rows.length > 0) {
           const origInv = invLookup.rows[0];
@@ -1262,14 +1276,15 @@ class InvoiceService {
               refund_amount = CASE WHEN $2 THEN $5 ELSE refund_amount END,
               payment_status = CASE WHEN $2 THEN 'Voided' ELSE payment_status END,
               updated_at = CURRENT_TIMESTAMP
-             WHERE id = $6`,
+             WHERE id = $6 AND branch_id = $7`,
             [
               newCreditAdj,
               isFullyReturned,
               reason ? `Vendor Return: ${reason.trim()}` : 'Vendor product return',
               date || new Date(),
               amount,
-              origInv.id
+              origInv.id,
+              branchId
             ]
           );
         }
@@ -1282,9 +1297,9 @@ class InvoiceService {
         await client.query(
           `INSERT INTO accounts (
             id, type, party_type, party_id, party_name, invoice_id, invoice_no,
-            amount, remaining, status, date
-          ) VALUES ($1, 'Vendor Receivable', 'Vendor', $2, $3, NULL, $4, $5, $6, 'Open', $7)`,
-          [accId, vendor.id, vendor.name, returnId, balance, balance, date || new Date()]
+            amount, remaining, status, date, branch_id
+          ) VALUES ($1, 'Vendor Receivable', 'Vendor', $2, $3, NULL, $4, $5, $6, 'Open', $7, $8)`,
+          [accId, vendor.id, vendor.name, returnId, balance, balance, date || new Date(), branchId]
         );
       }
 
@@ -1294,18 +1309,18 @@ class InvoiceService {
           `INSERT INTO payments (
             id, account_id, invoice_id, invoice_no, party_type, party_id, party_name, account_type,
             direction, amount, date, payment_method, reference_id, notes, affects_money,
-            is_initial_settlement, created_by, created_by_name
+            is_initial_settlement, created_by, created_by_name, branch_id
           ) VALUES (
             $1, $2, NULL, $3, 'Vendor', $4, $5, 'Vendor Receivable',
             $6, $7, $8, $9, $10, $11, $12,
-            TRUE, $13, $14
+            TRUE, $13, $14, $15
           )`,
           [
             payId, accId, returnId, vendor.id, vendor.name,
             (method === 'Exchange Credit' || method === 'Exchange' || method === 'Product Replacement / Exchange') ? 'Adjusted' : 'Received',
             initialSettlement, date || new Date(), method, referenceId || null,
             (method === 'Exchange Credit' || method === 'Exchange' || method === 'Product Replacement / Exchange') ? `Replacement product: ${repProduct?.code || ''}` : 'Initial vendor return refund',
-            method === 'Cash' || method === 'Online', user.id, user.name
+            method === 'Cash' || method === 'Online', user.id, user.name, branchId
           ]
         );
       }

@@ -12,7 +12,7 @@ const leaseSchema = `CREATE TABLE IF NOT EXISTS whatsapp_auth_leases (
 )`;
 
 async function hasSavedSession(pool, branchId) {
-  await pool.query(schema);
+
   const { rows } = await pool.query(
     "SELECT value FROM whatsapp_auth_state WHERE branch_id = $1 AND key = 'creds.json'", [branchId]);
   if (!rows.length) return null; // Allows a one-time import from the old file store.
@@ -23,8 +23,8 @@ async function hasSavedSession(pool, branchId) {
 // Ownership lives in a row, so it works through transaction-pooling proxies.
 // Each operation fences the owner inside its transaction before touching keys.
 async function openAuthStore(pool, branchId, authDir, baileys, onFailure, force = true) {
-  await pool.query(schema);
-  await pool.query(leaseSchema);
+
+
   const client = await pool.connect();
   const owner = randomUUID();
   let heartbeat;

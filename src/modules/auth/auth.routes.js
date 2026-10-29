@@ -107,7 +107,7 @@ router.post('/login', async (req, res, next) => {
     const branchId = identity.branch_id;
     const branchMeta = await branchManager.getBranchById(branchId);
 
-    if (!branchMeta || branchMeta.status === 'Inactive') {
+    if (!branchMeta || branchMeta.status !== 'Active') {
       return res.status(403).json({
         success: false,
         code: 'BRANCH_INACTIVE',

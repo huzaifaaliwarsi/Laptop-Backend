@@ -12,8 +12,10 @@ router.use(authenticateToken);
 router.get('/', cacheRoute(60), async (req, res, next) => {
   try {
     const { search, status, technicianId, customerId, jobType, categoryId, from, to } = req.query;
+    const branchId = getBranchIdFromReq(req) || 1;
     let queryText = 'SELECT * FROM repair_jobs WHERE 1=1';
-    const params = [];
+    const params = [branchId];
+    queryText += ' AND branch_id = $1';
 
     // If Technician, restrict to assigned jobs
     if (req.user.role === 'technician') {

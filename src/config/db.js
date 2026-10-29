@@ -8,33 +8,9 @@ require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 const branchManager = require('./branchManager');
 const branchContext = require('../middleware/branchContext');
 
-const poolConfig = process.env.DATABASE_URL
-  ? {
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
-      max: 20,
-      idleTimeoutMillis: 120000,
-      connectionTimeoutMillis: 10000,
-      keepAlive: true,
-      keepAliveInitialDelayMillis: 10000,
-    }
-  : {
-      host: process.env.DB_HOST || '127.0.0.1',
-      port: parseInt(process.env.DB_PORT || '5432', 10),
-      database: process.env.DB_NAME || 'isywouhn_saadcomm',
-      user: process.env.DB_USER || 'isywouhn_saadcomm_user',
-      password: process.env.DB_PASSWORD || '',
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
-    };
-
-// Default Branch 1 / Fallback pool
-const pool = new Pool(poolConfig);
-
-pool.on('error', (err) => {
-  console.error('Unexpected error on idle PostgreSQL client (Branch 1)', err);
-});
+const pool = branchManager.masterPool;
+const { createScopedPool } = require('./scopedPool');
+const defaultBranchPool = createScopedPool(pool, 1);
 
 /**
  * Returns the active request's branch pool, or defaults safely to Branch 1 pool
@@ -48,7 +24,7 @@ function getActivePool() {
   } catch (e) {
     // Ignore context error and use fallback pool
   }
-  return pool;
+  return defaultBranchPool;
 }
 
 const query = (text, params) => getActivePool().query(text, params);
@@ -92,13 +68,24 @@ const master = {
 };
 
 // Initialize Master DB and ensure Branch 1 critical columns exist
-(async () => {
+const ready = (async () => {
   try {
     // 1. Initialize Central Master DB
-    await branchManager.initMasterDb();
+    try {
+      await branchManager.initMasterDb();
+    } catch (mErr) {
+      console.warn('[DB Init] Master DB init note:', mErr.message);
+    }
+
+    try {
+      await require('../migrations/repairPartIds').migrateRepairPartIds(pool);
+    } catch (rErr) {
+      console.warn('[DB Init] Repair part IDs migration note:', rErr.message);
+    }
 
     // 2. Ensure Branch 1 operational database migrations
-    await pool.query(`
+    try {
+      await pool.query(`
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS address TEXT;
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS ntn_cnic VARCHAR(100);
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS st_reg_no VARCHAR(100);
@@ -145,7 +132,7 @@ const master = {
         ('Desktop', 'Custom PC towers, desktop workstations and gaming rigs', TRUE),
         ('Printer', 'Laser, inkjet, barcode and thermal printers', TRUE),
         ('Accessories', 'Chargers, power supplies, keyboards and peripherals', TRUE)
-      ON CONFLICT (name) DO NOTHING;
+      ON CONFLICT DO NOTHING;
 
       -- Add repair category references to repair_jobs
       ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS category_id INT REFERENCES repair_categories(id) ON DELETE SET NULL;
@@ -175,7 +162,7 @@ const master = {
 
       -- Migration: Dedicated workshop repair parts catalogue
       CREATE TABLE IF NOT EXISTS repair_parts (
-        id SERIAL PRIMARY KEY,
+        id VARCHAR(50) PRIMARY KEY,
         code VARCHAR(50) UNIQUE NOT NULL,
         name VARCHAR(255) NOT NULL,
         category VARCHAR(100) NOT NULL,
@@ -210,14 +197,14 @@ const master = {
         ('RAM', 'SO-DIMM and laptop memory sticks'),
         ('Cooling Fan', 'CPU/GPU cooling fans and heatsinks'),
         ('Power Supply', 'Internal power boards and adapters')
-      ON CONFLICT (name) DO NOTHING;
+      ON CONFLICT DO NOTHING;
 
       -- Migration: Spare parts inventory movements audit trail
       -- BUG FIX: part_id must be INT (not VARCHAR) to match repair_parts.id SERIAL type.
       -- Also added all missing columns that routes depend on (part_code, part_name, direction, etc.).
       CREATE TABLE IF NOT EXISTS repair_parts_movements (
         id SERIAL PRIMARY KEY,
-        part_id INT REFERENCES repair_parts(id) ON DELETE CASCADE,
+        part_id VARCHAR(50) REFERENCES repair_parts(id) ON DELETE CASCADE,
         part_code VARCHAR(50),
         part_name VARCHAR(255),
         direction VARCHAR(10) NOT NULL DEFAULT 'IN',
@@ -284,14 +271,43 @@ const master = {
 
       -- Add status column to repair_parts if missing
       ALTER TABLE repair_parts ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'Active';
+
+      -- Multi-tenant branch_id single-database architecture
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE inventory_movements ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE invoices ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE held_bills ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE customers ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE vendors ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE payments ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE accounts ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE expenses ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE vendor_returns ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE repair_parts ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE repair_parts_movements ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE repair_additional_work_requests ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE repair_services ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE whatsapp_conversations ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE whatsapp_messages ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
     `);
+    } catch (colErr) {
+      console.warn('[DB Init] Operational tables verification note (non-critical):', colErr.message);
+    }
   } catch (err) {
-    console.error('[DB Init] Column check error:', err.message);
+    console.warn('[DB Init] Startup check note:', err.message);
   }
 })();
 
+ready.catch(() => {});
+
 module.exports = {
-  pool,
+  ready,
+  pool: defaultBranchPool,
   query,
   getClient,
   withTransaction,

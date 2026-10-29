@@ -18,7 +18,7 @@ router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
 
     if (search && search.trim()) {
       params.push(`%${search.trim().toLowerCase()}%`);
-      whereClause = `WHERE (LOWER(c.name) LIKE $${params.length} OR LOWER(COALESCE(c.contact, '')) LIKE $${params.length} OR LOWER(COALESCE(c.address, '')) LIKE $${params.length} OR LOWER(c.id) LIKE $${params.length})`;
+      whereClause += ` AND (LOWER(c.name) LIKE $${params.length} OR LOWER(COALESCE(c.contact, '')) LIKE $${params.length} OR LOWER(COALESCE(c.address, '')) LIKE $${params.length} OR LOWER(c.id) LIKE $${params.length})`;
     }
 
     let havingClause = '';

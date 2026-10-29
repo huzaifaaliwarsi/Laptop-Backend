@@ -1,6 +1,5 @@
 const db = require('../config/db');
 
-
 /**
  * Derives current available balance for a payment method ('Cash' or 'Online')
  *
@@ -10,14 +9,16 @@ const db = require('../config/db');
  * - All Money Paid
  * - All Operating Expenses
  *
- * PERFORMANCE FIX:
- * Previously this function executed 3 sequential DB queries.
- * Now the same calculation is done in a single PostgreSQL query.
+ * Scoped by branch_id in Single Shared Database Architecture
  */
-async function getAvailableBalance(method, client = db) {
+async function getAvailableBalance(method, client = db, explicitBranchId = null) {
   if (!['Cash', 'Online'].includes(method)) {
     return 0;
   }
+
+  const branchContext = require('../middleware/branchContext');
+  const store = branchContext.getBranchStore();
+  const bId = explicitBranchId || client.branchId || store?.branchId || 1;
 
   const result = await client.query(
     `
@@ -27,58 +28,51 @@ async function getAvailableBalance(method, client = db) {
           (
             SELECT
               CASE
-                WHEN $1 = 'Cash'
-                  THEN opening_cash
+                WHEN $1 = 'Cash' THEN opening_cash
                 ELSE opening_online
               END
             FROM business_settings
-            WHERE id = 1
+            WHERE branch_id = $2
+            LIMIT 1
           ),
           0
         )
-
         +
-
         COALESCE(
           (
             SELECT SUM(
               CASE
-                WHEN direction = 'Received'
-                  THEN amount
-
-                WHEN direction = 'Paid'
-                  THEN -amount
-
+                WHEN direction = 'Received' THEN amount
+                WHEN direction = 'Paid' THEN -amount
                 ELSE 0
               END
             )
             FROM payments
             WHERE payment_method = $1
               AND affects_money = TRUE
+              AND branch_id = $2
           ),
           0
         )
-
         -
-
         COALESCE(
           (
             SELECT SUM(amount)
             FROM expenses
             WHERE payment_method = $1
+              AND branch_id = $2
           ),
           0
         )
       ) AS available_balance
     `,
-    [method]
+    [method, bId]
   );
 
   return parseFloat(
     result.rows[0]?.available_balance || 0
   );
 }
-
 
 /**
  * Checks outflow against available funds without hard-blocking,
@@ -89,7 +83,8 @@ async function validateOutflow(
   method,
   amount,
   label = 'Payment',
-  client = db
+  client = db,
+  explicitBranchId = null
 ) {
   const reqAmount = parseFloat(amount || 0);
 
@@ -104,7 +99,8 @@ async function validateOutflow(
   try {
     const available = await getAvailableBalance(
       method,
-      client
+      client,
+      explicitBranchId
     );
 
     if (reqAmount > available + 0.005) {
@@ -121,7 +117,6 @@ async function validateOutflow(
 
   return true;
 }
-
 
 module.exports = {
   getAvailableBalance,

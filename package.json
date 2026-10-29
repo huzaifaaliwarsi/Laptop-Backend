@@ -5,8 +5,13 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch-path=src src/server.js",
+    "dev": "node --watch-path=src scripts/start-local.cjs",
+    "start:local": "node scripts/start-local.cjs",
+    "setup:local": "node scripts/start-local.cjs --setup-only",
+    "test:branches": "node scripts/branch-integration.cjs && node scripts/branch-integration.cjs --legacy",
+    "test:whatsapp": "node --test src/modules/whatsapp/auth-store.test.cjs src/modules/whatsapp/session.test.cjs",
     "migrate": "node seeds/developmentSeed.js",
+    "migrate:cpanel": "node seeds/cpanel_migrate.js",
     "seed": "node seeds/seedRealisticData.js"
   },
   "dependencies": {

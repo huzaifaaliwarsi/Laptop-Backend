@@ -131,7 +131,7 @@ app.use(errorHandler);
 // Automatically restore WhatsApp connection in background if a saved session exists
 try {
   const baileys = require('./modules/whatsapp/baileys.service');
-  baileys.initWhatsAppIfSessionExists().catch(e => {
+  require('./config/db').ready.then(() => process.env.NODE_ENV === 'test' ? undefined : baileys.initWhatsAppIfSessionExists()).catch(e => {
     console.warn('[Baileys] Auto-init on app boot:', e.message);
   });
 } catch (_) {}

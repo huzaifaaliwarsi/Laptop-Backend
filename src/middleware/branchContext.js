@@ -10,6 +10,7 @@ const branchStorage = new AsyncLocalStorage();
  */
 async function branchContextMiddleware(req, res, next) {
   try {
+    await require('../config/db').ready;
     let branchId = 1;
     let isSuperAdmin = false;
     let token = null;
@@ -37,24 +38,30 @@ async function branchContextMiddleware(req, res, next) {
     if (isSuperAdmin) {
       // Super Admin is authorized to explicitly select branch via X-Branch-Id header
       if (req.headers['x-branch-id']) {
-        const headerBId = parseInt(req.headers['x-branch-id'], 10);
+        const headerBId = Number(req.headers['x-branch-id']);
         if (!isNaN(headerBId) && headerBId > 0) {
           branchId = headerBId;
         }
       }
-    } else if (decoded && decoded.branchId) {
+    } else if (decoded) {
       // Normal Branch User (admin, sales, technician) is LOCKED to their token's branchId
-      branchId = parseInt(decoded.branchId, 10) || 1;
+      branchId = Number(decoded.branchId || 1);
     } else if (req.headers['x-branch-id']) {
       // Unauthenticated request (e.g. login attempt with explicit branch selection)
-      const headerBId = parseInt(req.headers['x-branch-id'], 10);
+      const headerBId = Number(req.headers['x-branch-id']);
       if (!isNaN(headerBId) && headerBId > 0) {
         branchId = headerBId;
       }
     }
 
+    // Ignore client-supplied branch ownership.
+    if (req.body && typeof req.body === 'object') {
+      delete req.body.branch_id;
+      req.body.branchId = branchId;
+    }
     // 3. Acquire Branch Pool from trusted Master Registry
-    const pool = await branchManager.getBranchPool(branchId, isSuperAdmin);
+    const isLogin = ['/api/auth/login', '/api/super-admin/login'].includes(req.path);
+    const pool = await branchManager.getBranchPool(branchId, isSuperAdmin || isLogin);
     req.branchId = branchId;
 
     // 4. Run downstream handlers within AsyncLocalStorage context
@@ -62,19 +69,7 @@ async function branchContextMiddleware(req, res, next) {
       next();
     });
   } catch (err) {
-    // If Super Admin request failed to connect to specific branch, try fallback pool
-    if (req.headers['x-branch-id'] && req.headers.authorization) {
-      try {
-        const fallbackPool = await branchManager.getBranchPool(1, true);
-        req.branchId = 1;
-        return branchStorage.run({ branchId: 1, pool: fallbackPool, isSuperAdmin: true }, () => {
-          next();
-        });
-      } catch (fallbackErr) {
-        return next(err);
-      }
-    }
-    // For normal branch users, pass error to errorHandler/auth middleware
+
     next(err);
   }
 }

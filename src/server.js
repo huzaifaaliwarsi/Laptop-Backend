@@ -16,7 +16,7 @@ for (const p of envCandidates) {
     if (fs.existsSync(p)) {
       require('dotenv').config({ path: p });
     }
-  } catch (_) {}
+  } catch (_) { }
 }
 require('dotenv').config();
 
@@ -42,11 +42,16 @@ async function restoreWhatsApp() {
     if (!stopping) startupRetry = setTimeout(restoreWhatsApp, 10000);
   }
 }
-restoreWhatsApp();
+require('./config/db').ready.then(() => {
+  restoreWhatsApp();
 
-server.listen(PORT, () => {
-  console.log(`[Express API Server] Running on http://localhost:${PORT}`);
+  server.listen(PORT, () => console.log('[Express API Server] Listening on port ' + PORT));
+}).catch(error => {
+  console.warn('[Startup] Database startup check note:', error.message);
+  restoreWhatsApp();
+  server.listen(PORT, () => console.log('[Express API Server] Listening on port ' + PORT));
 });
+
 
 async function shutdown() {
   if (stopping) return;

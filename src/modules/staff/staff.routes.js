@@ -17,15 +17,16 @@ router.use(authenticateToken);
 router.get('/', cacheRoute(120), async (req, res, next) => {
   try {
     const { role } = req.query;
-    let queryText = 'SELECT id, name, contact, designation, role, username, status, created_at FROM users';
-    const params = [];
-
+    const branchId = getBranchIdFromReq(req) || 1;
+    let queryText = 'SELECT id, name, contact, designation, role, username, status, created_at FROM users WHERE branch_id = $1';
+    const params = [branchId];
     if (role) {
-      queryText += ' WHERE role = $1';
+      params.push(role);
+      queryText += ` AND role = ${params.length}`;
       params.push(role);
     } else if (req.user.role !== 'admin' && req.user.role !== 'super_admin') {
       // Non-admins can only query active technicians for assignment dropdowns
-      queryText += " WHERE role = 'technician' AND status = 'Active'";
+      queryText += " AND role = 'technician' AND status = 'Active'";
     }
 
     queryText += ' ORDER BY created_at ASC';
