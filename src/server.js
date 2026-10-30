@@ -42,13 +42,9 @@ async function restoreWhatsApp() {
     if (!stopping) startupRetry = setTimeout(restoreWhatsApp, 10000);
   }
 }
-require('./config/db').ready.then(() => {
+require('./config/db').ready.finally(() => {
   restoreWhatsApp();
 
-  server.listen(PORT, () => console.log('[Express API Server] Listening on port ' + PORT));
-}).catch(error => {
-  console.warn('[Startup] Database startup check note:', error.message);
-  restoreWhatsApp();
   server.listen(PORT, () => console.log('[Express API Server] Listening on port ' + PORT));
 });
 

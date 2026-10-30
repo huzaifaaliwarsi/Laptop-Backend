@@ -13,8 +13,9 @@ router.use(authenticateToken);
 router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { search, balance } = req.query;
-    let whereClause = '';
-    const params = [];
+    const bId = getBranchIdFromReq(req);
+    let whereClause = 'WHERE c.branch_id = $1';
+    const params = [bId];
 
     if (search && search.trim()) {
       params.push(`%${search.trim().toLowerCase()}%`);
@@ -36,7 +37,7 @@ router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
         COALESCE(SUM(CASE WHEN a.type = 'Customer Receivable' AND a.status = 'Open' THEN a.remaining ELSE 0 END), 0) as receivable,
         COALESCE(SUM(CASE WHEN a.type = 'Customer Payable' AND a.status = 'Open' THEN a.remaining ELSE 0 END), 0) as payable
       FROM customers c
-      LEFT JOIN accounts a ON a.party_id = c.id
+      LEFT JOIN accounts a ON a.party_id = c.id AND a.branch_id = c.branch_id
       ${whereClause}
       GROUP BY c.id
       ${havingClause}

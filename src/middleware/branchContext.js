@@ -15,6 +15,7 @@ async function branchContextMiddleware(req, res, next) {
     let isSuperAdmin = false;
     let token = null;
 
+
     // 1. Extract JWT token if present
     if (req.cookies && req.cookies.token) {
       token = req.cookies.token;
@@ -36,9 +37,10 @@ async function branchContextMiddleware(req, res, next) {
 
     // 2. Branch Resolution with Anti-Spoofing Rules
     if (isSuperAdmin) {
-      // Super Admin is authorized to explicitly select branch via X-Branch-Id header
-      if (req.headers['x-branch-id']) {
-        const headerBId = Number(req.headers['x-branch-id']);
+      // Super Admin is authorized to explicitly select branch via X-Branch-Id header or query
+      const targetB = req.headers['x-branch-id'] || req.headers['x-branch_id'] || req.query?.branchId || req.query?.branch_id;
+      if (targetB) {
+        const headerBId = Number(targetB);
         if (!isNaN(headerBId) && headerBId > 0) {
           branchId = headerBId;
         }
@@ -46,11 +48,13 @@ async function branchContextMiddleware(req, res, next) {
     } else if (decoded) {
       // Normal Branch User (admin, sales, technician) is LOCKED to their token's branchId
       branchId = Number(decoded.branchId || 1);
-    } else if (req.headers['x-branch-id']) {
-      // Unauthenticated request (e.g. login attempt with explicit branch selection)
-      const headerBId = Number(req.headers['x-branch-id']);
-      if (!isNaN(headerBId) && headerBId > 0) {
-        branchId = headerBId;
+    } else {
+      const targetB = req.headers['x-branch-id'] || req.headers['x-branch_id'] || req.query?.branchId || req.query?.branch_id;
+      if (targetB) {
+        const headerBId = Number(targetB);
+        if (!isNaN(headerBId) && headerBId > 0) {
+          branchId = headerBId;
+        }
       }
     }
 

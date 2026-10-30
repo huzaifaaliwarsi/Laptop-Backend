@@ -25,14 +25,16 @@ router.get('/', cacheRoute(60), async (req, res, next) => {
 // GET /api/products/ledger - Inventory movement history (Cached 60s)
 router.get('/ledger', cacheRoute(60), async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const query = `
       SELECT m.*, u.name as performed_by_name
       FROM inventory_movements m
       LEFT JOIN users u ON u.id = m.performed_by
+      WHERE m.branch_id = $1
       ORDER BY m.date DESC, m.created_at DESC
       LIMIT 100
     `;
-    const result = await db.query(query);
+    const result = await db.query(query, [bId]);
 
     return res.json({
       success: true,
@@ -88,7 +90,8 @@ router.get('/:id/history', cacheRoute(60), async (req, res, next) => {
 // GET /api/products/export-csv - Export full inventory as formatted CSV
 router.get('/export-csv', requireSalesOrAdmin, async (req, res, next) => {
   try {
-    const products = await InventoryService.getProducts({}, req.user.role);
+    const bId = getBranchIdFromReq(req) || 1;
+    const products = await InventoryService.getProducts({ ...req.query, branchId: bId }, req.user.role);
 
     const headers = [
       'Product Code',
@@ -311,14 +314,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // Insert Invoice Item
         await client.query(
           `INSERT INTO invoice_items (
-            invoice_id, item_type, product_id, code, name, description, quantity,
+            invoice_id, branch_id, item_type, product_id, code, name, description, quantity,
             unit_price, cost_price_snapshot, line_total
-          ) VALUES ($1, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
+          ) VALUES ($1, $10, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
           [
             generatedInvoiceId, product.id, product.code,
             `${product.brand} ${product.model}`.trim(),
             `${product.category_name} — ${product.brand} ${product.model}`,
-            qty, costPrice, costPrice, totalCost
+            qty, costPrice, costPrice, totalCost, branchId
           ]
         );
 
@@ -580,14 +583,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           } else {
             await client.query(
               `INSERT INTO invoice_items (
-                invoice_id, item_type, product_id, code, name, description, quantity,
+                invoice_id, branch_id, item_type, product_id, code, name, description, quantity,
                 unit_price, cost_price_snapshot, line_total
-              ) VALUES ($1, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
+              ) VALUES ($1, $10, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
               [
                 targetInvoiceId, id, updatedProduct.code,
                 `${updatedProduct.brand} ${updatedProduct.model}`.trim(),
                 `${updatedProduct.category_name} — ${updatedProduct.brand} ${updatedProduct.model}`,
-                effectiveQty, effectiveCostPrice, effectiveCostPrice, totalCost
+                effectiveQty, effectiveCostPrice, effectiveCostPrice, totalCost, branchId
               ]
             );
           }
@@ -681,14 +684,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
           await client.query(
             `INSERT INTO invoice_items (
-              invoice_id, item_type, product_id, code, name, description, quantity,
+              invoice_id, branch_id, item_type, product_id, code, name, description, quantity,
               unit_price, cost_price_snapshot, line_total
-            ) VALUES ($1, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
+            ) VALUES ($1, $10, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
             [
               targetInvoiceId, id, updatedProduct.code,
               `${updatedProduct.brand} ${updatedProduct.model}`.trim(),
               `${updatedProduct.category_name} — ${updatedProduct.brand} ${updatedProduct.model}`,
-              effectiveQty, effectiveCostPrice, effectiveCostPrice, totalCost
+              effectiveQty, effectiveCostPrice, effectiveCostPrice, totalCost, branchId
             ]
           );
 

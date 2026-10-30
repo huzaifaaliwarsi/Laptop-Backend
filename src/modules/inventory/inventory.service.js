@@ -229,18 +229,24 @@ class InventoryService {
   }
 
   static async addOrMergeProduct(productData, sourceData, user, client = db) {
+    const branchId = Number(require('../../middleware/branchContext').getBranchStore()?.branchId || client.branchId || user?.branchId || 1);
     const categoryName = productData.categoryName || productData.category;
     let categoryId = productData.categoryId;
 
-    if (!categoryId) {
-      const catRes = await client.query('SELECT id FROM product_categories WHERE LOWER(name) = LOWER($1)', [categoryName]);
+    if (!categoryId && categoryName) {
+      const catRes = await client.query('SELECT id FROM product_categories WHERE LOWER(name) = LOWER($1) AND branch_id = $2', [categoryName, branchId]);
       if (catRes.rows.length > 0) {
         categoryId = catRes.rows[0].id;
       } else {
-        const insertCat = await client.query('INSERT INTO product_categories (name, code_prefix) VALUES ($1, $2) RETURNING id', [
-          categoryName,
-          categoryName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'PRD'
-        ]);
+        // Fallback: check if exists in branch 1 to inherit code_prefix
+        const b1Cat = await client.query('SELECT code_prefix, custom_fields FROM product_categories WHERE LOWER(name) = LOWER($1) LIMIT 1', [categoryName]);
+        const codePrefix = b1Cat.rows[0]?.code_prefix || categoryName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'PRD';
+        const customFields = b1Cat.rows[0]?.custom_fields || '[]';
+
+        const insertCat = await client.query(
+          'INSERT INTO product_categories (name, code_prefix, is_system, branch_id, custom_fields) VALUES ($1, $2, FALSE, $3, $4::jsonb) RETURNING id',
+          [categoryName, codePrefix, branchId, typeof customFields === 'string' ? customFields : JSON.stringify(customFields)]
+        );
         categoryId = insertCat.rows[0].id;
       }
     }
@@ -260,7 +266,7 @@ class InventoryService {
          AND LOWER(COALESCE(specifications, '')) = LOWER($4)
          AND branch_id = $5
        FOR UPDATE`,
-      [categoryName, productData.brand, productData.model, specifications, productData.branchId || user?.branchId || require('../../middleware/branchContext').getBranchStore()?.branchId || 1]
+      [categoryName, productData.brand, productData.model, specifications, branchId]
     );
 
     if (existingRes.rows.length > 0) {
@@ -322,7 +328,6 @@ class InventoryService {
     }
 
     // Otherwise create new product
-    const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
     const code = await getNextProductCode(categoryId, client, branchId);
     const productId = await getNextEntityId('products', 'id', 'PRD', 4, client);
 
@@ -373,7 +378,7 @@ class InventoryService {
         sourceData.sourceName || null,
         sourceData.invoiceNo || null,
         sourceData.date || new Date(),
-        productData.branchId || user?.branchId || require('../../middleware/branchContext').getBranchStore()?.branchId || 1
+        branchId
       ]
     );
 
@@ -385,7 +390,6 @@ class InventoryService {
     }
 
     // Log movement
-    const newBranchId = productData.branchId || user?.branchId || require('../../middleware/branchContext').getBranchStore()?.branchId || 1;
     await client.query(
       `INSERT INTO inventory_movements (product_id, product_code, direction, quantity, reason, reference_type, reference_id, performed_by, date, branch_id)
        VALUES ($1, $2, 'IN', $3, $4, $5, $6, $7, $8, $9)`,
@@ -398,7 +402,7 @@ class InventoryService {
         sourceData.refId || 'MANUAL',
         validUserId,
         sourceData.date || new Date(),
-        newBranchId
+        branchId
       ]
     );
 
@@ -557,14 +561,14 @@ class InventoryService {
 
         await client.query(
           `INSERT INTO invoice_items (
-            invoice_id, item_type, product_id, code, name, description, quantity,
+            invoice_id, branch_id, item_type, product_id, code, name, description, quantity,
             unit_price, cost_price_snapshot, line_total
-          ) VALUES ($1, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
+          ) VALUES ($1, $10, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
           [
             targetInvoiceId, productId, product.code,
             `${product.brand} ${product.model}`.trim(),
             `Stock Adjustment (${reason || 'Stock Refill'}) — ${product.category_name} ${product.brand} ${product.model}`,
-            qty, effectiveCostPrice, effectiveCostPrice, totalCost
+            qty, effectiveCostPrice, effectiveCostPrice, totalCost, candidateBranchId
           ]
         );
 

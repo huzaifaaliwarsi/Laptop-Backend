@@ -321,66 +321,109 @@ async function provisionBranch2Database(payload, performedBy = 'superadmin') {
     }
 
     // 4. Reserve in master_staff_identities
-    await masterClient.query(
-      `INSERT INTO master_staff_identities (
-        branch_id, branch_user_id, normalized_username, normalized_phone,
-        role, status, reservation_status, created_at, updated_at
-      ) VALUES (
-        2, 'USR-ADMIN-BR02', $1, $2,
-        'admin', 'Active', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-      ) ON CONFLICT (normalized_username) DO UPDATE SET
-        branch_id = 2,
-        branch_user_id = 'USR-ADMIN-BR02',
-        normalized_phone = EXCLUDED.normalized_phone,
-        status = 'Active'`,
-      [adminUsername, adminContact]
-    );
+    const existStaff = await masterClient.query('SELECT id FROM master_staff_identities WHERE normalized_username = $1 LIMIT 1', [adminUsername]);
+    if (existStaff.rows.length > 0) {
+      await masterClient.query(`
+        UPDATE master_staff_identities SET
+          branch_id = 2,
+          branch_user_id = 'USR-ADMIN-BR02',
+          normalized_phone = $1,
+          status = 'Active',
+          updated_at = CURRENT_TIMESTAMP
+        WHERE normalized_username = $2
+      `, [adminContact, adminUsername]);
+    } else {
+      await masterClient.query(`
+        INSERT INTO master_staff_identities (
+          branch_id, branch_user_id, normalized_username, normalized_phone,
+          role, status, reservation_status, created_at, updated_at
+        ) VALUES (
+          2, 'USR-ADMIN-BR02', $1, $2,
+          'admin', 'Active', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+      `, [adminUsername, adminContact]);
+    }
 
     // 5. Create Branch 2 Admin in users table with branch_id = 2
     const salt = await bcrypt.genSalt(10);
     const adminPassHash = await bcrypt.hash(adminPassword, salt);
 
-    await masterClient.query(`
-      INSERT INTO users (id, branch_id, name, contact, designation, role, username, password_hash, status)
-      VALUES ('USR-ADMIN-BR02', 2, $1, $2, 'Branch Manager', 'admin', $3, $4, 'Active')
-      ON CONFLICT (username) DO UPDATE SET
-        branch_id = 2,
-        name = EXCLUDED.name,
-        password_hash = EXCLUDED.password_hash,
-        status = 'Active'
-    `, [adminName, adminContact, adminUsername, adminPassHash]);
+    const existUser = await masterClient.query('SELECT id FROM users WHERE username = $1 LIMIT 1', [adminUsername]);
+    if (existUser.rows.length > 0) {
+      await masterClient.query(`
+        UPDATE users SET
+          branch_id = 2,
+          name = $1,
+          contact = $2,
+          designation = 'Branch Manager',
+          role = 'admin',
+          password_hash = $3,
+          status = 'Active',
+          updated_at = CURRENT_TIMESTAMP
+        WHERE username = $4
+      `, [adminName, adminContact, adminPassHash, adminUsername]);
+    } else {
+      await masterClient.query(`
+        INSERT INTO users (id, branch_id, name, contact, designation, role, username, password_hash, status)
+        VALUES ('USR-ADMIN-BR02', 2, $1, $2, 'Branch Manager', 'admin', $3, $4, 'Active')
+      `, [adminName, adminContact, adminUsername, adminPassHash]);
+    }
 
     // 6. Initialize Branch 2 Business Settings with branch_id = 2
     const openCash = parseFloat(payload.openingCash || 0);
     const openOnline = parseFloat(payload.openingOnline || 0);
 
-    await masterClient.query(`
-      INSERT INTO business_settings (
-        id, branch_id, company_name, tagline, phone, address, 
-        opening_cash, opening_online
-      ) VALUES (
-        2, 2, $1, $2, $3, $4, $5, $6
-      ) ON CONFLICT (branch_id) DO UPDATE SET
-        company_name = EXCLUDED.company_name,
-        phone = EXCLUDED.phone,
-        address = EXCLUDED.address,
-        opening_cash = EXCLUDED.opening_cash,
-        opening_online = EXCLUDED.opening_online
-    `, [
-      payload.branchName || 'Branch 2',
-      'POS, Inventory & Repair Workshop',
-      payload.phone || '',
-      payload.address || '',
-      openCash,
-      openOnline
-    ]);
+    const existSettings = await masterClient.query('SELECT id FROM business_settings WHERE branch_id = 2 LIMIT 1');
+    if (existSettings.rows.length > 0) {
+      await masterClient.query(`
+        UPDATE business_settings SET
+          company_name = $1,
+          phone = $2,
+          address = $3,
+          opening_cash = $4,
+          opening_online = $5,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE branch_id = 2
+      `, [
+        payload.branchName || 'Branch 2',
+        payload.phone || '',
+        payload.address || '',
+        openCash,
+        openOnline
+      ]);
+    } else {
+      await masterClient.query(`
+        INSERT INTO business_settings (
+          branch_id, company_name, tagline, phone, address, 
+          opening_cash, opening_online, updated_at
+        ) VALUES (
+          2, $1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP
+        )
+      `, [
+        payload.branchName || 'Branch 2',
+        'POS, Inventory & Repair Workshop',
+        payload.phone || '',
+        payload.address || '',
+        openCash,
+        openOnline
+      ]);
+    }
 
     // 7. Initialize Branch 2 WhatsApp Settings with branch_id = 2
-    await masterClient.query(`
-      INSERT INTO whatsapp_settings (id, branch_id, business_name)
-      VALUES (2, 2, $1)
-      ON CONFLICT (branch_id) DO UPDATE SET business_name = EXCLUDED.business_name
-    `, [payload.branchName || 'Branch 2']);
+    const existWA = await masterClient.query('SELECT id FROM whatsapp_settings WHERE branch_id = 2 LIMIT 1');
+    if (existWA.rows.length > 0) {
+      await masterClient.query(`
+        UPDATE whatsapp_settings SET
+          business_name = $1,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE branch_id = 2
+      `, [payload.branchName || 'Branch 2']);
+    } else {
+      await masterClient.query(`
+        INSERT INTO whatsapp_settings (branch_id, business_name, updated_at)
+        VALUES (2, $1, CURRENT_TIMESTAMP)
+      `, [payload.branchName || 'Branch 2']);
+    }
 
     // 8. Register Branch 2 in Master DB registry (points to single shared DB)
     let host = process.env.DB_HOST || '127.0.0.1';
@@ -397,40 +440,61 @@ async function provisionBranch2Database(payload, performedBy = 'superadmin') {
       } catch (e) {}
     }
 
-    const insertRes = await masterClient.query(`
-      INSERT INTO master_branches (
-        id, branch_code, branch_name, db_name, db_host, db_port, db_user,
-        schema_version, status,
-        phone, email, city, address, admin_name, admin_username, admin_password_encrypted
-      ) VALUES (
-        2, $1, $2, $3, $4, $5, $6, '${CURRENT_SCHEMA_VERSION}', 'Active',
-        $7, $8, $9, $10, $11, $12, $13
-      ) ON CONFLICT (branch_code) DO UPDATE SET
-        branch_name = EXCLUDED.branch_name,
-        status = 'Active',
-        phone = EXCLUDED.phone,
-        email = EXCLUDED.email,
-        city = EXCLUDED.city,
-        address = EXCLUDED.address,
-        admin_name = EXCLUDED.admin_name,
-        admin_username = EXCLUDED.admin_username,
-        admin_password_encrypted = EXCLUDED.admin_password_encrypted
-      RETURNING id, branch_code, branch_name, db_name, db_host, db_port, db_user, db_ssl, schema_version, status, phone, email, city, address, admin_name, admin_username, admin_password_encrypted, created_at
-    `, [
-      branchCode,
-      payload.branchName || 'Branch 2',
-      targetDbName,
-      host,
-      port,
-      user,
-      payload.phone || '',
-      payload.email || '',
-      payload.city || 'Karachi',
-      payload.address || '',
-      payload.adminName || 'Branch 2 Manager',
-      adminUsername,
-      encrypt(adminPassword)
-    ]);
+    let insertRes;
+    const existBranch = await masterClient.query('SELECT id FROM master_branches WHERE branch_code = $1 OR id = 2 LIMIT 1', [branchCode]);
+    if (existBranch.rows.length > 0) {
+      insertRes = await masterClient.query(`
+        UPDATE master_branches SET
+          branch_name = $1,
+          status = 'Active',
+          phone = $2,
+          email = $3,
+          city = $4,
+          address = $5,
+          admin_name = $6,
+          admin_username = $7,
+          admin_password_encrypted = $8,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $9
+        RETURNING id, branch_code, branch_name, db_name, db_host, db_port, db_user, db_ssl, schema_version, status, phone, email, city, address, admin_name, admin_username, admin_password_encrypted, created_at
+      `, [
+        payload.branchName || 'Branch 2',
+        payload.phone || '',
+        payload.email || '',
+        payload.city || 'Karachi',
+        payload.address || '',
+        payload.adminName || 'Branch 2 Manager',
+        adminUsername,
+        encrypt(adminPassword),
+        existBranch.rows[0].id
+      ]);
+    } else {
+      insertRes = await masterClient.query(`
+        INSERT INTO master_branches (
+          id, branch_code, branch_name, db_name, db_host, db_port, db_user,
+          schema_version, status,
+          phone, email, city, address, admin_name, admin_username, admin_password_encrypted
+        ) VALUES (
+          2, $1, $2, $3, $4, $5, $6, '${CURRENT_SCHEMA_VERSION}', 'Active',
+          $7, $8, $9, $10, $11, $12, $13
+        )
+        RETURNING id, branch_code, branch_name, db_name, db_host, db_port, db_user, db_ssl, schema_version, status, phone, email, city, address, admin_name, admin_username, admin_password_encrypted, created_at
+      `, [
+        branchCode,
+        payload.branchName || 'Branch 2',
+        targetDbName,
+        host,
+        port,
+        user,
+        payload.phone || '',
+        payload.email || '',
+        payload.city || 'Karachi',
+        payload.address || '',
+        payload.adminName || 'Branch 2 Manager',
+        adminUsername,
+        encrypt(adminPassword)
+      ]);
+    }
 
     // 9. Log to Master Audit Log
     await masterClient.query(`

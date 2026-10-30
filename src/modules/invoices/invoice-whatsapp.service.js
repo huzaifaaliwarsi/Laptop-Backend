@@ -117,28 +117,28 @@ class InvoiceWhatsAppService {
       // 4. Log in WhatsApp CRM (whatsapp_conversations & whatsapp_messages)
       try {
         let convId = null;
-        const convRes = await db.query('SELECT id FROM whatsapp_conversations WHERE contact = $1', [rawContact]);
+        const convRes = await db.query('SELECT id FROM whatsapp_conversations WHERE contact = $1 AND branch_id = $2', [rawContact, branchId]);
         if (convRes.rows.length > 0) {
           convId = convRes.rows[0].id;
         } else {
           convId = await getNextEntityId('whatsapp_conversations', 'id', 'CONV', 4);
           await db.query(
-            `INSERT INTO whatsapp_conversations (id, contact, name, status, lead_type)
-             VALUES ($1, $2, $3, 'Bot Active', 'Invoice Notification')`,
-            [convId, rawContact, invoice.partyName || 'Customer / Vendor']
+            `INSERT INTO whatsapp_conversations (id, branch_id, contact, name, status, lead_type)
+             VALUES ($1, $2, $3, $4, 'Bot Active', 'Invoice Notification')`,
+            [convId, branchId, rawContact, invoice.partyName || 'Customer / Vendor']
           );
         }
 
         const logMsg = `[PDF Document: ${fileName}]\n${captionText}`;
         await db.query(
-          `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag)
-           VALUES ($1, 'out', $2, 'invoice')`,
-          [convId, logMsg]
+          `INSERT INTO whatsapp_messages (conversation_id, branch_id, direction, text, tag)
+           VALUES ($1, $2, 'out', $3, 'invoice')`,
+          [convId, branchId, logMsg]
         );
 
         await db.query(
-          `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-          [logMsg, convId]
+          `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND branch_id = $3`,
+          [logMsg, convId, branchId]
         );
 
         emitEvent('whatsapp.message_added', {

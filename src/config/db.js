@@ -114,15 +114,37 @@ const ready = (async () => {
       ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS hs_code VARCHAR(50);
       ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS discount NUMERIC(18, 2) DEFAULT 0.00;
 
+      -- Fix global UNIQUE(name) constraints to multi-tenant UNIQUE(branch_id, name)
+      ALTER TABLE product_categories ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE expense_categories ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE accessory_categories ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE product_categories DROP CONSTRAINT IF EXISTS product_categories_name_key;
+      ALTER TABLE product_categories DROP CONSTRAINT IF EXISTS product_categories_branch_name_key;
+      ALTER TABLE product_categories ADD CONSTRAINT product_categories_branch_name_key UNIQUE (branch_id, name);
+
+      ALTER TABLE expense_categories DROP CONSTRAINT IF EXISTS expense_categories_name_key;
+      ALTER TABLE expense_categories DROP CONSTRAINT IF EXISTS expense_categories_branch_name_key;
+      ALTER TABLE expense_categories ADD CONSTRAINT expense_categories_branch_name_key UNIQUE (branch_id, name);
+
+      ALTER TABLE accessory_categories DROP CONSTRAINT IF EXISTS accessory_categories_name_key;
+      ALTER TABLE accessory_categories DROP CONSTRAINT IF EXISTS accessory_categories_branch_name_key;
+      ALTER TABLE accessory_categories ADD CONSTRAINT accessory_categories_branch_name_key UNIQUE (branch_id, name);
+
       -- Create dedicated repair_categories table
       CREATE TABLE IF NOT EXISTS repair_categories (
         id SERIAL PRIMARY KEY,
-        name VARCHAR(100) UNIQUE NOT NULL,
+        branch_id INT NOT NULL DEFAULT 1,
+        name VARCHAR(100) NOT NULL,
         description TEXT,
         is_active BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
+      ALTER TABLE repair_categories DROP CONSTRAINT IF EXISTS repair_categories_name_key;
+      ALTER TABLE repair_categories ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+      ALTER TABLE repair_categories DROP CONSTRAINT IF EXISTS repair_categories_branch_name_key;
+      ALTER TABLE repair_categories ADD CONSTRAINT repair_categories_branch_name_key UNIQUE (branch_id, name);
+
 
       -- Seed default repair categories if not present
       INSERT INTO repair_categories (name, description, is_active)
@@ -294,9 +316,86 @@ const ready = (async () => {
       ALTER TABLE whatsapp_conversations ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
       ALTER TABLE whatsapp_messages ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
       ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS branch_id INT NOT NULL DEFAULT 1;
+
+      -- Core Operational Multi-Tenant Tables & Counters
+      CREATE TABLE IF NOT EXISTS branch_counters (
+        branch_id INTEGER NOT NULL,
+        key TEXT NOT NULL,
+        value BIGINT NOT NULL,
+        PRIMARY KEY(branch_id, key)
+      );
+      CREATE TABLE IF NOT EXISTS whatsapp_auth_state (
+        branch_id INTEGER NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY(branch_id, key)
+      );
+      CREATE TABLE IF NOT EXISTS whatsapp_auth_leases (
+        branch_id INTEGER PRIMARY KEY,
+        owner TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE SEQUENCE IF NOT EXISTS public.entity_id_sequence START 1000000000;
+
+      CREATE TABLE IF NOT EXISTS repair_parts_movements (
+        id SERIAL PRIMARY KEY,
+        branch_id INT NOT NULL DEFAULT 1,
+        part_id VARCHAR(50) REFERENCES repair_parts(id) ON DELETE CASCADE,
+        part_code VARCHAR(50),
+        part_name VARCHAR(255),
+        direction VARCHAR(10) NOT NULL DEFAULT 'IN',
+        quantity INT NOT NULL DEFAULT 0,
+        reason TEXT,
+        reference_type VARCHAR(100),
+        reference_id VARCHAR(100),
+        balance_after INT DEFAULT 0,
+        performed_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+        performed_by_name VARCHAR(255),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS repair_additional_work_requests (
+        id VARCHAR(50) PRIMARY KEY,
+        branch_id INT NOT NULL DEFAULT 1,
+        repair_job_id VARCHAR(50) NOT NULL REFERENCES repair_jobs(id) ON DELETE CASCADE,
+        tracking_id VARCHAR(100),
+        fault_finding TEXT NOT NULL DEFAULT '',
+        recommended_service TEXT NOT NULL DEFAULT '',
+        diagnosed_fault TEXT,
+        recommended_action TEXT,
+        service_charge NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
+        parts_charge NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
+        total_quotation NUMERIC(18, 2) NOT NULL DEFAULT 0.00,
+        customer_safe_note TEXT,
+        parts_payload JSONB DEFAULT '[]'::jsonb,
+        status VARCHAR(50) NOT NULL DEFAULT 'Pending Approval',
+        approval_source VARCHAR(50),
+        approved_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+        approved_by_name VARCHAR(255),
+        customer_response TEXT,
+        quotation_snapshot JSONB,
+        created_by VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
+        created_by_name VARCHAR(255),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        approved_at TIMESTAMP WITH TIME ZONE,
+        declined_at TIMESTAMP WITH TIME ZONE,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_addl_work_repair_job ON repair_additional_work_requests(repair_job_id);
+      CREATE INDEX IF NOT EXISTS idx_addl_work_status ON repair_additional_work_requests(status);
+      CREATE INDEX IF NOT EXISTS idx_addl_work_branch ON repair_additional_work_requests(branch_id);
+      CREATE INDEX IF NOT EXISTS idx_parts_mov_part_id ON repair_parts_movements(part_id);
+      CREATE INDEX IF NOT EXISTS idx_parts_mov_branch ON repair_parts_movements(branch_id);
     `);
     } catch (colErr) {
       console.warn('[DB Init] Operational tables verification note (non-critical):', colErr.message);
+    }
+    // Requests must not run until all branch policies and runtime grants exist (if permitted by hosting).
+    try {
+      await require('../migrations/sharedDatabase').migrateSharedDatabase(pool);
+    } catch (migErr) {
+      console.warn('[DB Init] Shared database runtime migration note (proceeding smoothly):', migErr.message);
     }
   } catch (err) {
     console.warn('[DB Init] Startup check note:', err.message);

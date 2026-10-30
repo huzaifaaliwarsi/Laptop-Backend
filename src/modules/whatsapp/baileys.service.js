@@ -525,8 +525,8 @@ class BaileysService {
         // 2. Find or create conversation in whatsapp_conversations
         let conv = null;
         const convRes = await pool.query(
-          'SELECT * FROM whatsapp_conversations WHERE contact = $1 OR contact LIKE $2 ORDER BY updated_at DESC LIMIT 1',
-          [cleanPhone, `%${cleanPhone.slice(-10)}%`]
+          'SELECT * FROM whatsapp_conversations WHERE (contact = $1 OR contact LIKE $2) AND branch_id = $3 ORDER BY updated_at DESC LIMIT 1',
+          [cleanPhone, `%${cleanPhone.slice(-10)}%`, branchId]
         );
 
         if (convRes.rows.length > 0) {
@@ -534,21 +534,21 @@ class BaileysService {
         } else {
           const convId = await getNextEntityId('whatsapp_conversations', 'id', 'CONV', 4, pool);
           const insRes = await pool.query(
-            `INSERT INTO whatsapp_conversations (id, contact, name, status, lead_type)
-             VALUES ($1, $2, $3, 'Bot Active', 'General') RETURNING *`,
-            [convId, cleanPhone || 'WhatsApp User', msg.pushName || 'WhatsApp Customer']
+            `INSERT INTO whatsapp_conversations (id, branch_id, contact, name, status, lead_type)
+             VALUES ($1, $2, $3, $4, 'Bot Active', 'General') RETURNING *`,
+            [convId, branchId, cleanPhone || 'WhatsApp User', msg.pushName || 'WhatsApp Customer']
           );
           conv = insRes.rows[0];
         }
 
         // 3. Log incoming customer message in CRM
         await pool.query(
-          `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag) VALUES ($1, 'in', $2, 'customer')`,
-          [conv.id, text]
+          `INSERT INTO whatsapp_messages (conversation_id, branch_id, direction, text, tag) VALUES ($1, $2, 'in', $3, 'customer')`,
+          [conv.id, branchId, text]
         );
         await pool.query(
-          `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-          [text, conv.id]
+          `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND branch_id = $3`,
+          [text, conv.id, branchId]
         );
         emitEvent('whatsapp.message_added', { conversationId: conv.id, text, direction: 'in' });
         emitEvent('whatsapp.conversation_updated', { conversationId: conv.id });

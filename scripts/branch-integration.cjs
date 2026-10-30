@@ -31,6 +31,8 @@ async function main() {
  }
  console.log('PASS fresh schema + startup migrations');
  const manager=require('../src/config/branchManager');
+ const catalogTables=require('../src/migrations/branchCatalogs').catalogTables;
+ for(const table of catalogTables) await manager.masterPool.query(`INSERT INTO ${table}(name,branch_id) VALUES ('Private Branch One Category',1)`);
  await manager.provisionBranch2Database({branchName:'Test Branch 2',adminUsername:'testadmin2',adminPassword:'LocalTest@123'});
  console.log('PASS branch 2 provisioning in same database');
  const {deleteEmptyBranch}=require('../src/services/deleteBranch');
@@ -39,6 +41,16 @@ async function main() {
  await manager.provisionBranch2Database({branchName:'Test Branch 2',adminUsername:'testadmin2',adminPassword:'LocalTest@123'});
  console.log('PASS empty-branch deletion cleans setup records and permits clean recreation');
  const b1=await manager.getBranchPool(1), b2=await manager.getBranchPool(2);
+ assert.equal((await b2.query('SELECT current_user AS name')).rows[0].name,'retail_branch_runtime');
+ for(const table of catalogTables) {
+   assert.equal((await b2.query(`SELECT * FROM ${table} WHERE name='Private Branch One Category'`)).rowCount,0);
+ }
+ await b1.query("INSERT INTO vendors(id,name) VALUES ('PRIVATE-V1','Private Branch One Vendor')");
+ await b2.query("INSERT INTO vendors(id,name) VALUES ('PRIVATE-V2','Private Branch Two Vendor')");
+ assert.deepEqual((await b2.query('SELECT id FROM vendors')).rows,[{id:'PRIVATE-V2'}]);
+ assert.equal((await b2.query("UPDATE vendors SET name='wrong' WHERE id='PRIVATE-V1'")).rowCount,0);
+ assert.equal((await b2.query("DELETE FROM vendors WHERE id='PRIVATE-V1'")).rowCount,0);
+ console.log('PASS runtime role, private catalogs and vendor read/write isolation');
  assert.equal((await b1.query('SELECT current_database() AS name')).rows[0].name,(await b2.query('SELECT current_database() AS name')).rows[0].name);
  await b1.query("INSERT INTO customers(id,name) VALUES ('TEST-C1','Branch One')");
  await b2.query("INSERT INTO customers(id,name) VALUES ('TEST-C2','Branch Two')");
@@ -54,6 +66,7 @@ async function main() {
  await Promise.all(Array.from({length:20},(_,i)=>(i%2?b1:b2).query('SELECT branch_id FROM customers').then(r=>assert.ok(r.rows.every(x=>x.branch_id===(i%2?1:2))))));
  console.log('PASS transaction rollback and concurrent pooled branch isolation');
  await require('../src/migrations/sharedDatabase').migrateSharedDatabase(manager.masterPool);
+ for(const table of catalogTables) assert.equal((await b2.query(`SELECT * FROM ${table} WHERE name='Private Branch One Category'`)).rowCount,0);
  console.log('PASS migration rerun');
  const app=require('../src/app'); httpServer=app.listen(0,'127.0.0.1');
  await new Promise(resolve=>httpServer.once('listening',resolve));
@@ -65,6 +78,16 @@ async function main() {
   const data=await r.json(); if(r.status>=500) throw new Error(route+': '+JSON.stringify(data));
   return {status:r.status,data};
  }
+ for(let attempt=0;attempt<2;attempt++) {
+   const vendors=await request('/api/vendors');
+   assert.equal(vendors.status,200);
+   assert.ok(JSON.stringify(vendors.data).includes('Private Branch Two Vendor'));
+   assert.ok(!JSON.stringify(vendors.data).includes('Private Branch One Vendor'));
+   const categories=await request('/api/categories');
+   assert.equal(categories.status,200);
+   assert.ok(!JSON.stringify(categories.data).includes('Private Branch One Category'));
+ }
+ console.log('PASS vendor/category HTTP lists and cached lists reject foreign-branch data');
  let r=await request('/api/customers','POST',{name:'HTTP Branch Two',branchId:1});
  assert.equal(r.status,201,JSON.stringify(r.data));
  assert.equal((await manager.masterPool.query("SELECT branch_id FROM customers WHERE name='HTTP Branch Two'")).rows[0].branch_id,2);
@@ -121,6 +144,24 @@ async function main() {
  console.log('PASS populated-branch deletion rejected atomically');
  const sa=(await manager.masterPool.query('SELECT id FROM master_super_admins LIMIT 1')).rows[0];
  const saToken=jwt.sign({id:sa.id,role:'super_admin'},process.env.JWT_SECRET);
+ for(let attempt=0;attempt<2;attempt++) {
+  for(const [type,id] of [['customer','TEST-C1'],['vendor','PRIVATE-V1']]) {
+   const hidden=await request(`/api/ledger/party/${type}/${id}`);
+   assert.equal(hidden.status,404,JSON.stringify(hidden.data));
+  }
+  const secondSales=await request('/api/reports/sales');
+  assert.equal(secondSales.status,200);
+  assert.equal(secondSales.data.summary.grossSales,150);
+  const firstSales=await request('/api/reports/sales','GET',undefined,saToken);
+  assert.equal(firstSales.status,200);
+  assert.deepEqual(firstSales.data.data,[]);
+  assert.equal(firstSales.data.summary.grossSales,0);
+  const firstStock=await request('/api/reports/inventory','GET',undefined,saToken);
+  assert.equal(firstStock.data.summary.totalCostValue,0);
+  const secondStock=await request('/api/reports/inventory');
+  assert.equal(secondStock.data.summary.totalCostValue,560);
+ }
+ console.log('PASS foreign customer/vendor ledgers and branch-specific report totals, including cache hits');
  for(const suffix of ['', '?from=2026-01-01','?from=2026-01-01&to=2026-12-31']) {
   r=await request('/api/super-admin/reports/consolidated'+suffix,'GET',undefined,saToken);
   assert.equal(r.status,200,JSON.stringify(r.data));

@@ -2,7 +2,13 @@ const errorHandler = (err, req, res, next) => {
   console.error('[API Error]:', err);
 
   if (err.code === '42501') {
-    return res.status(403).json({success:false,code:'BRANCH_ACCESS_DENIED',message:'This operation is not allowed for the selected branch.'});
+    return res.status(403).json({
+      success: false,
+      code: 'BRANCH_ACCESS_DENIED',
+      message: err.message || 'This operation is not allowed for the selected branch.',
+      detail: err.detail || err.message,
+      table: err.table
+    });
   }
 
   // PostgreSQL unique violation error

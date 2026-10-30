@@ -149,6 +149,7 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
     }
 
     // Admin Dashboard
+    const bId = getBranchIdFromReq(req) || 1;
     const [
       prodRes,
       salesRes,
@@ -170,7 +171,8 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
           COALESCE(SUM(current_stock * cost_price), 0) as stock_cost_value,
           COALESCE(SUM(current_stock * expected_sale_price), 0) as stock_sale_value
         FROM products
-      `),
+        WHERE branch_id = $1
+      `, [bId]),
       // Net Sales = non-voided Sales Invoice totals (formula: gross - credit_adjusted)
       db.query(`
         SELECT 
@@ -179,7 +181,8 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
           COUNT(CASE WHEN type = 'Sales Invoice' AND is_voided = FALSE THEN 1 END) as total_sales_count,
           COUNT(CASE WHEN type = 'Sales Invoice' AND is_voided = FALSE AND date = CURRENT_DATE THEN 1 END) as today_sales_count
         FROM invoices
-      `),
+        WHERE branch_id = $1
+      `, [bId]),
       db.query(`
         SELECT 
           COALESCE(SUM(CASE WHEN type = 'Customer Receivable' AND status = 'Open' THEN remaining ELSE 0 END), 0) as customer_receivable,
@@ -187,7 +190,8 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
           COALESCE(SUM(CASE WHEN type = 'Vendor Payable' AND status = 'Open' THEN remaining ELSE 0 END), 0) as vendor_payable,
           COALESCE(SUM(CASE WHEN type = 'Vendor Receivable' AND status = 'Open' THEN remaining ELSE 0 END), 0) as vendor_receivable
         FROM accounts
-      `),
+        WHERE branch_id = $1
+      `, [bId]),
       db.query(`
         SELECT 
           COUNT(CASE WHEN status NOT IN ('Delivered & Closed', 'Cancelled', 'Returned Without Repair') THEN 1 END) as active_repairs,
@@ -198,31 +202,33 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
           COALESCE(SUM(CASE WHEN status = 'Delivered & Closed' THEN total ELSE 0 END), 0) as repair_revenue,
           COUNT(CASE WHEN expected_completion < CURRENT_DATE AND status NOT IN ('Delivered & Closed', 'Cancelled', 'Returned Without Repair') THEN 1 END) as overdue
         FROM repair_jobs
-      `),
+        WHERE branch_id = $1
+      `, [bId]),
       db.query(`
         SELECT 
           COALESCE(SUM(amount), 0) as total_expenses,
           COALESCE(SUM(CASE WHEN date = CURRENT_DATE THEN amount ELSE 0 END), 0) as today_expenses
         FROM expenses
-      `),
-      getAvailableBalance('Cash'),
-      getAvailableBalance('Online'),
+        WHERE branch_id = $1
+      `, [bId]),
+      getAvailableBalance('Cash', db, bId),
+      getAvailableBalance('Online', db, bId),
       db.query(`
         SELECT id, invoice_no, type, date, party_name, total, paid, balance, payment_status, is_voided, created_by_name
-        FROM invoices ORDER BY date DESC, created_at DESC LIMIT 6
-      `),
+        FROM invoices WHERE branch_id = $1 ORDER BY date DESC, created_at DESC LIMIT 6
+      `, [bId]),
       db.query(`
         SELECT id, tracking_id, customer_name, contact as customer_contact, category_name as category, brand, model, status, priority, total, date, expected_completion
-        FROM repair_jobs ORDER BY date DESC, created_at DESC LIMIT 6
-      `),
+        FROM repair_jobs WHERE branch_id = $1 ORDER BY date DESC, created_at DESC LIMIT 6
+      `, [bId]),
       db.query(`
         SELECT id, date, description as title, category_name as category, amount, payment_method
-        FROM expenses ORDER BY date DESC, created_at DESC LIMIT 5
-      `),
+        FROM expenses WHERE branch_id = $1 ORDER BY date DESC, created_at DESC LIMIT 5
+      `, [bId]),
       db.query(`
         SELECT code, brand, model, category_name as category, current_stock, low_stock_alert, cost_price, expected_sale_price as sale_price
-        FROM products WHERE current_stock <= low_stock_alert ORDER BY current_stock ASC LIMIT 6
-      `)
+        FROM products WHERE branch_id = $1 AND current_stock <= low_stock_alert ORDER BY current_stock ASC LIMIT 6
+      `, [bId])
     ]);
 
     return res.json({
@@ -276,6 +282,7 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
 router.get('/sales', cacheRoute(30), async (req, res, next) => {
   try {
     const { from, to, staffId, paymentMethod, type } = req.query;
+    const bId = getBranchIdFromReq(req) || 1;
 
     let queryText = `
       SELECT 
@@ -291,10 +298,11 @@ router.get('/sales', cacheRoute(30), async (req, res, next) => {
           WHERE ii.invoice_id = i.id AND ii.item_type IN ('product', 'custom_product')
         ), 0) as cogs
       FROM invoices i
-      WHERE i.is_voided = FALSE
+      WHERE i.branch_id = $1
+        AND i.is_voided = FALSE
         AND i.type IN ('Sales Invoice', 'Exchange Invoice', 'Custom Sale Invoice')
     `;
-    const params = [];
+    const params = [bId];
 
     if (req.user.role === 'sales') {
       params.push(req.user.id);
@@ -378,6 +386,7 @@ router.get('/sales', cacheRoute(30), async (req, res, next) => {
 router.get('/returns', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to } = req.query;
+    const bId = getBranchIdFromReq(req) || 1;
 
     // Full voids (entire invoice returned)
     let voidQuery = `
@@ -392,10 +401,11 @@ router.get('/returns', requireAdmin, cacheRoute(60), async (req, res, next) => {
           WHERE ii.invoice_id = i.id AND ii.item_type IN ('product', 'custom_product')
         ), 0) as cogs_reversed
       FROM invoices i
-      WHERE i.type IN ('Sales Invoice', 'Exchange Invoice', 'Custom Sale Invoice')
+      WHERE i.branch_id = $1
+        AND i.type IN ('Sales Invoice', 'Exchange Invoice', 'Custom Sale Invoice')
         AND i.is_voided = TRUE
     `;
-    const voidParams = [];
+    const voidParams = [bId];
     voidQuery = applyDateFilter(voidQuery, voidParams, from, to, 'i.void_date');
     voidQuery += ' ORDER BY i.void_date DESC NULLS LAST, i.created_at DESC';
 
@@ -408,11 +418,12 @@ router.get('/returns', requireAdmin, cacheRoute(60), async (req, res, next) => {
         'Partial Return' as return_type,
         0 as cogs_reversed
       FROM invoices i
-      WHERE i.type IN ('Sales Invoice', 'Exchange Invoice', 'Custom Sale Invoice')
+      WHERE i.branch_id = $1
+        AND i.type IN ('Sales Invoice', 'Exchange Invoice', 'Custom Sale Invoice')
         AND i.is_voided = FALSE
         AND i.credit_adjusted > 0.005
     `;
-    const partialParams = [];
+    const partialParams = [bId];
     partialQuery = applyDateFilter(partialQuery, partialParams, from, to, 'i.date');
     partialQuery += ' ORDER BY i.date DESC, i.created_at DESC';
 
@@ -474,6 +485,7 @@ router.get('/returns', requireAdmin, cacheRoute(60), async (req, res, next) => {
 router.get('/purchases', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to, paymentMethod, staffId, type } = req.query;
+    const bId = getBranchIdFromReq(req) || 1;
 
     let queryText = `
       SELECT 
@@ -482,9 +494,10 @@ router.get('/purchases', requireAdmin, cacheRoute(60), async (req, res, next) =>
         i.payment_method, i.payment_status, i.is_voided,
         i.created_by_name
       FROM invoices i
-      WHERE i.type IN ('Vendor Purchase', 'Customer Purchase', 'Buyback Invoice')
+      WHERE i.branch_id = $1
+        AND i.type IN ('Vendor Purchase', 'Customer Purchase', 'Buyback Invoice')
     `;
-    const params = [];
+    const params = [bId];
 
     if (staffId) {
       params.push(staffId);
@@ -558,6 +571,7 @@ router.get('/purchases', requireAdmin, cacheRoute(60), async (req, res, next) =>
 router.get('/vendor-returns', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to, staffId, paymentMethod } = req.query;
+    const bId = getBranchIdFromReq(req) || 1;
 
     let queryText = `
       SELECT 
@@ -569,9 +583,9 @@ router.get('/vendor-returns', requireAdmin, cacheRoute(60), async (req, res, nex
         vr.payment_method, vr.settlement_method, vr.reason,
         vr.status, vr.created_by_name
       FROM vendor_returns vr
-      WHERE 1=1
+      WHERE vr.branch_id = $1
     `;
-    const params = [];
+    const params = [bId];
 
     if (staffId) {
       params.push(staffId);
@@ -648,6 +662,7 @@ router.get('/vendor-returns', requireAdmin, cacheRoute(60), async (req, res, nex
 router.get('/inventory', requireAdmin, cacheRoute(120), async (req, res, next) => {
   try {
     const { from, to, category } = req.query;
+    const bId = getBranchIdFromReq(req) || 1;
 
     let queryText = `
       SELECT 
@@ -660,9 +675,9 @@ router.get('/inventory', requireAdmin, cacheRoute(120), async (req, res, next) =
         (p.current_stock * p.expected_sale_price) as sale_value,
         ((p.current_stock * p.expected_sale_price) - (p.current_stock * p.cost_price)) as unrealised_margin
       FROM products p
-      WHERE 1=1
+      WHERE p.branch_id = $1
     `;
-    const params = [];
+    const params = [bId];
 
     if (category) {
       params.push(category);
@@ -729,6 +744,7 @@ router.get('/inventory', requireAdmin, cacheRoute(120), async (req, res, next) =
 router.get('/spare-parts', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { category, search, status } = req.query;
+    const bId = getBranchIdFromReq(req) || 1;
 
     let queryText = `
       SELECT 
@@ -741,10 +757,10 @@ router.get('/spare-parts', requireAdmin, cacheRoute(60), async (req, res, next) 
         COALESCE(SUM(rpu.quantity * rpu.cost_price_snapshot), 0) as total_cogs_consumed,
         COALESCE(SUM(rpu.customer_charge), 0) as total_revenue_generated
       FROM repair_parts p
-      LEFT JOIN repair_parts_used rpu ON rpu.part_id = p.id
-      WHERE 1=1
+      LEFT JOIN repair_parts_used rpu ON rpu.part_id = p.id AND rpu.branch_id = $1
+      WHERE p.branch_id = $1
     `;
-    const params = [];
+    const params = [bId];
 
     if (category) {
       params.push(category);
@@ -846,6 +862,7 @@ router.get('/spare-parts', requireAdmin, cacheRoute(60), async (req, res, next) 
 router.get('/expenses', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to, category, paymentMethod } = req.query;
+    const bId = getBranchIdFromReq(req) || 1;
 
     let queryText = `
       SELECT 
@@ -853,9 +870,9 @@ router.get('/expenses', requireAdmin, cacheRoute(60), async (req, res, next) => 
         e.amount, e.payment_method, e.reference_id,
         e.created_by_name
       FROM expenses e
-      WHERE 1=1
+      WHERE e.branch_id = $1
     `;
-    const params = [];
+    const params = [bId];
 
     if (category) {
       params.push(category);
@@ -917,8 +934,9 @@ router.get('/expenses', requireAdmin, cacheRoute(60), async (req, res, next) => 
 router.get('/repairs', cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to, staffId, status } = req.query;
-    let queryText = 'SELECT * FROM repair_jobs WHERE 1=1';
-    const params = [];
+    const bId = getBranchIdFromReq(req) || 1;
+    let queryText = 'SELECT * FROM repair_jobs WHERE branch_id = $1';
+    const params = [bId];
 
     if (req.user.role === 'technician') {
       params.push(req.user.id);
@@ -1005,10 +1023,11 @@ router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next)
         SUM(CASE WHEN direction = 'Received' THEN amount ELSE 0 END) as received,
         SUM(CASE WHEN direction = 'Paid' THEN amount ELSE 0 END) as paid_out
       FROM payments
-      WHERE affects_money = TRUE
+      WHERE branch_id = $1
+        AND affects_money = TRUE
         AND payment_method IN ('Cash', 'Online')
     `;
-    const cashParams = [];
+    const cashParams = [branchId];
     cashQuery = applyDateFilter(cashQuery, cashParams, from, to, 'date');
     cashQuery += ' GROUP BY payment_method';
 
@@ -1017,9 +1036,9 @@ router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next)
         payment_method,
         SUM(amount) as total_expenses
       FROM expenses
-      WHERE 1=1
+      WHERE branch_id = $1
     `;
-    const expParams = [];
+    const expParams = [branchId];
     expQuery = applyDateFilter(expQuery, expParams, from, to, 'date');
     expQuery += ' GROUP BY payment_method';
 
@@ -1031,9 +1050,9 @@ router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next)
         SUM(CASE WHEN direction = 'Received' THEN amount ELSE 0 END) as received,
         SUM(CASE WHEN direction = 'Paid' THEN amount ELSE 0 END) as paid_out
       FROM payments
-      WHERE affects_money = TRUE AND payment_method IN ('Cash', 'Online')
+      WHERE branch_id = $1 AND affects_money = TRUE AND payment_method IN ('Cash', 'Online')
     `;
-    const dailyParams = [];
+    const dailyParams = [branchId];
     dailyQuery = applyDateFilter(dailyQuery, dailyParams, from, to, 'date');
     dailyQuery += ' GROUP BY date, payment_method ORDER BY date ASC';
 
@@ -1114,6 +1133,7 @@ router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next)
 router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { from, to } = req.query;
+    const bId = getBranchIdFromReq(req) || 1;
 
     // --- REVENUE QUERIES ---
 
@@ -1125,9 +1145,9 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
         COALESCE(SUM(CASE WHEN is_voided = FALSE THEN service_total ELSE 0 END), 0) as gross_service_sales,
         COALESCE(SUM(CASE WHEN is_voided = FALSE THEN credit_adjusted ELSE 0 END), 0) as partial_return_adj
       FROM invoices 
-      WHERE type = 'Sales Invoice'
+      WHERE branch_id = $1 AND type = 'Sales Invoice'
     `;
-    const retailParams = [];
+    const retailParams = [bId];
     retailQuery = applyDateFilter(retailQuery, retailParams, from, to, 'date');
 
     // 2. Repair Revenue — only from delivered+closed invoices
@@ -1135,9 +1155,9 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
       SELECT 
         COALESCE(SUM(i.total), 0) as repair_revenue
       FROM invoices i
-      WHERE i.type IN ('Repair Invoice', 'Diagnosis Invoice') AND i.is_voided = FALSE
+      WHERE i.branch_id = $1 AND i.type IN ('Repair Invoice', 'Diagnosis Invoice') AND i.is_voided = FALSE
     `;
-    const repairParams = [];
+    const repairParams = [bId];
     repairQuery = applyDateFilter(repairQuery, repairParams, from, to, 'i.date');
 
     // 3. Exchange net income/cost
@@ -1146,9 +1166,9 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
         COALESCE(SUM(CASE WHEN exchange_case = 'Customer Pays Shop' THEN total ELSE 0 END), 0) as exchange_income,
         COALESCE(SUM(CASE WHEN exchange_case = 'Shop Pays Customer'  THEN total ELSE 0 END), 0) as exchange_cost
       FROM invoices
-      WHERE type = 'Exchange Invoice' AND is_voided = FALSE
+      WHERE branch_id = $1 AND type = 'Exchange Invoice' AND is_voided = FALSE
     `;
-    const exParams = [];
+    const exParams = [bId];
     exchangeQuery = applyDateFilter(exchangeQuery, exParams, from, to, 'date');
 
     // 4. Custom Sale Revenue
@@ -1157,9 +1177,9 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
         COALESCE(SUM(CASE WHEN is_voided = FALSE THEN product_total ELSE 0 END), 0) as custom_sale_revenue,
         COALESCE(SUM(CASE WHEN is_voided = FALSE THEN service_total ELSE 0 END), 0) as custom_service_revenue
       FROM invoices
-      WHERE type = 'Custom Sale Invoice'
+      WHERE branch_id = $1 AND type = 'Custom Sale Invoice'
     `;
-    const csParams = [];
+    const csParams = [bId];
     customSaleQuery = applyDateFilter(customSaleQuery, csParams, from, to, 'date');
 
     // 5. Buyback revenue (Customer Purchase = shop bought from customer)
@@ -1169,9 +1189,9 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
       SELECT 
         COALESCE(SUM(CASE WHEN is_voided = FALSE THEN total ELSE 0 END), 0) as buyback_cost
       FROM invoices
-      WHERE type IN ('Customer Purchase', 'Buyback Invoice')
+      WHERE branch_id = $1 AND type IN ('Customer Purchase', 'Buyback Invoice')
     `;
-    const bbParams = [];
+    const bbParams = [bId];
     buybackQuery = applyDateFilter(buybackQuery, bbParams, from, to, 'date');
 
     // --- COGS QUERIES ---
@@ -1181,10 +1201,10 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
       SELECT COALESCE(SUM(ii.quantity * ii.cost_price_snapshot), 0) as retail_cogs
       FROM invoice_items ii
       JOIN invoices i ON i.id = ii.invoice_id
-      WHERE i.type = 'Sales Invoice' AND i.is_voided = FALSE 
+      WHERE i.branch_id = $1 AND i.type = 'Sales Invoice' AND i.is_voided = FALSE 
         AND ii.item_type IN ('product', 'custom_product')
     `;
-    const retailCogsParams = [];
+    const retailCogsParams = [bId];
     retailCogsQuery = applyDateFilter(retailCogsQuery, retailCogsParams, from, to, 'i.date');
 
     // 7. COGS reversed from voided Sales Invoice items
@@ -1192,10 +1212,10 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
       SELECT COALESCE(SUM(ii.quantity * ii.cost_price_snapshot), 0) as voided_cogs
       FROM invoice_items ii
       JOIN invoices i ON i.id = ii.invoice_id
-      WHERE i.type = 'Sales Invoice' AND i.is_voided = TRUE 
+      WHERE i.branch_id = $1 AND i.type = 'Sales Invoice' AND i.is_voided = TRUE 
         AND ii.item_type IN ('product', 'custom_product')
     `;
-    const voidCogsParams = [];
+    const voidCogsParams = [bId];
     voidCogsQuery = applyDateFilter(voidCogsQuery, voidCogsParams, from, to, 'i.date');
 
     // 8. Repair Parts COGS — from repair_parts_used (parts consumed by technicians)
@@ -1203,9 +1223,9 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
       SELECT COALESCE(SUM(rpu.quantity * rpu.cost_price_snapshot), 0) as repair_cogs
       FROM repair_parts_used rpu
       JOIN repair_jobs rj ON rj.id = rpu.repair_job_id
-      WHERE rj.status = 'Delivered & Closed'
+      WHERE rj.branch_id = $1 AND rj.status = 'Delivered & Closed'
     `;
-    const repCogsParams = [];
+    const repCogsParams = [bId];
     // Date filter on repair job date
     if (from) {
       repCogsParams.push(from);
@@ -1221,10 +1241,10 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
       SELECT COALESCE(SUM(ii.quantity * ii.cost_price_snapshot), 0) as repair_inv_cogs
       FROM invoice_items ii
       JOIN invoices i ON i.id = ii.invoice_id
-      WHERE i.type IN ('Repair Invoice', 'Diagnosis Invoice') 
+      WHERE i.branch_id = $1 AND i.type IN ('Repair Invoice', 'Diagnosis Invoice') 
         AND i.is_voided = FALSE AND ii.item_type = 'product'
     `;
-    const repInvCogsParams = [];
+    const repInvCogsParams = [bId];
     repairInvCogsQuery = applyDateFilter(repairInvCogsQuery, repInvCogsParams, from, to, 'i.date');
 
     // 9. Custom Sale COGS
@@ -1232,15 +1252,15 @@ router.get('/profit-loss', requireAdmin, cacheRoute(60), async (req, res, next) 
       SELECT COALESCE(SUM(ii.quantity * ii.cost_price_snapshot), 0) as custom_cogs
       FROM invoice_items ii
       JOIN invoices i ON i.id = ii.invoice_id
-      WHERE i.type = 'Custom Sale Invoice' AND i.is_voided = FALSE
+      WHERE i.branch_id = $1 AND i.type = 'Custom Sale Invoice' AND i.is_voided = FALSE
         AND ii.item_type IN ('product', 'custom_product')
     `;
-    const csCogsParams = [];
+    const csCogsParams = [bId];
     csCogsQuery = applyDateFilter(csCogsQuery, csCogsParams, from, to, 'i.date');
 
     // 10. Operating Expenses
-    let expQuery = `SELECT COALESCE(SUM(amount), 0) as expenses FROM expenses WHERE 1=1`;
-    const expParams = [];
+    let expQuery = `SELECT COALESCE(SUM(amount), 0) as expenses FROM expenses WHERE branch_id = $1`;
+    const expParams = [bId];
     expQuery = applyDateFilter(expQuery, expParams, from, to, 'date');
 
     // --- RUN ALL IN PARALLEL ---
@@ -1366,6 +1386,7 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
   try {
     const { type } = req.params;
     const { from, to } = req.query;
+    const bId = getBranchIdFromReq(req) || 1;
 
     // Re-use the internal report endpoints by making a local DB call
     // and formatting as CSV.
@@ -1381,9 +1402,9 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
                i.product_total, i.service_total, i.total, i.paid, i.credit_adjusted,
                GREATEST(0, i.total - i.paid) as remaining, i.payment_status, i.created_by_name
         FROM invoices i
-        WHERE i.is_voided = FALSE AND i.type IN ('Sales Invoice','Exchange Invoice','Custom Sale Invoice')
+        WHERE i.branch_id = $1 AND i.is_voided = FALSE AND i.type IN ('Sales Invoice','Exchange Invoice','Custom Sale Invoice')
       `;
-      const p = [];
+      const p = [bId];
       q = applyDateFilter(q, p, from, to, 'i.date');
       q += ' ORDER BY i.date DESC';
       const r = await db.query(q, p);
@@ -1410,11 +1431,11 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
                i.refund_amount, i.refund_method, i.void_reason,
                'Full Void' as return_type
         FROM invoices i
-        WHERE i.type IN ('Sales Invoice','Exchange Invoice','Custom Sale Invoice') AND i.is_voided = TRUE
+        WHERE i.branch_id = $1 AND i.type IN ('Sales Invoice','Exchange Invoice','Custom Sale Invoice') AND i.is_voided = TRUE
       `;
-      const p = [];
+      const p = [bId];
       q = applyDateFilter(q, p, from, to, 'i.void_date');
-      q += ' UNION ALL SELECT i.invoice_no, i.date, i.party_name, i.credit_adjusted, i.paid, i.credit_adjusted, i.refund_method, NULL, \'Partial Return\' FROM invoices i WHERE i.type IN (\'Sales Invoice\',\'Exchange Invoice\',\'Custom Sale Invoice\') AND i.is_voided = FALSE AND i.credit_adjusted > 0.005';
+      q += ` UNION ALL SELECT i.invoice_no, i.date, i.party_name, i.credit_adjusted, i.paid, i.credit_adjusted, i.refund_method, NULL, 'Partial Return' FROM invoices i WHERE i.branch_id = ${bId} AND i.type IN ('Sales Invoice','Exchange Invoice','Custom Sale Invoice') AND i.is_voided = FALSE AND i.credit_adjusted > 0.005`;
       q += ' ORDER BY date DESC NULLS LAST';
       const r = await db.query(q, p);
       csv = toCSV(r.rows, [
@@ -1436,9 +1457,9 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
                GREATEST(0, i.total - i.paid - i.credit_adjusted) as remaining,
                i.payment_status, i.created_by_name
         FROM invoices i
-        WHERE i.type IN ('Vendor Purchase','Customer Purchase','Buyback Invoice')
+        WHERE i.branch_id = $1 AND i.type IN ('Vendor Purchase','Customer Purchase','Buyback Invoice')
       `;
-      const p = [];
+      const p = [bId];
       q = applyDateFilter(q, p, from, to, 'i.date');
       q += ' ORDER BY i.date DESC';
       const r = await db.query(q, p);
@@ -1464,9 +1485,9 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
                vr.quantity, vr.amount, vr.actual_money_received, vr.exchange_value,
                vr.payable_adjustment, vr.settlement_method, vr.replacement_product_name,
                vr.replacement_qty, vr.reason, vr.status
-        FROM vendor_returns vr WHERE 1=1
+        FROM vendor_returns vr WHERE vr.branch_id = $1
       `;
-      const p = [];
+      const p = [bId];
       if (staffId) {
         p.push(staffId);
         q += ` AND vr.created_by = $${p.length}`;
@@ -1503,8 +1524,10 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
                (p.current_stock * p.cost_price) as cost_value,
                (p.current_stock * p.expected_sale_price) as sale_value,
                p.low_stock_alert, p.date_added
-        FROM products p ORDER BY p.category_name, p.brand
-      `);
+        FROM products p
+        WHERE p.branch_id = $1
+        ORDER BY p.category_name, p.brand
+      `, [bId]);
       csv = toCSV(r.rows, [
         { key: 'code', label: 'Product Code' },
         { key: 'inventory_type', label: 'Type' },
@@ -1528,9 +1551,9 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
       let q = `
         SELECT e.date, e.category_name, e.description, e.amount, e.payment_method,
                e.reference_id, e.created_by_name
-        FROM expenses e WHERE 1=1
+        FROM expenses e WHERE e.branch_id = $1
       `;
-      const p = [];
+      const p = [bId];
       q = applyDateFilter(q, p, from, to, 'e.date');
       q += ' ORDER BY e.date DESC';
       const r = await db.query(q, p);
@@ -1550,9 +1573,9 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
                technician_name, status, total, paid,
                GREATEST(0, total - paid) as remaining,
                expected_completion
-        FROM repair_jobs WHERE 1=1
+        FROM repair_jobs WHERE branch_id = $1
       `;
-      const p = [];
+      const p = [bId];
       q = applyDateFilter(q, p, from, to, 'date');
       q += ' ORDER BY date DESC';
       const r = await db.query(q, p);

@@ -11,6 +11,14 @@ function createScopedPool(pool, branchId) {
     async function begin() {
       await raw.query('BEGIN');
       inTransaction = true;
+      await raw.query(`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'retail_branch_runtime') THEN
+            EXECUTE 'SET LOCAL ROLE retail_branch_runtime';
+          END IF;
+        END $$;
+      `);
       await raw.query("SELECT set_config('app.branch_id', $1, true)", [String(id)]);
     }
     async function execute(sql, params) {
@@ -40,7 +48,7 @@ function createScopedPool(pool, branchId) {
       branchId: id,
       query(sql, params) {
         const result = queue.then(() => execute(sql, params));
-        queue = result.catch(() => {});
+        queue = result.catch(() => { });
         return result;
       },
       release(error) {
@@ -60,7 +68,7 @@ function createScopedPool(pool, branchId) {
       try { return await client.query(sql, params); } finally { client.release(); }
     },
     // Branch handles share one physical pool; closing a branch must not close it.
-    async end() {}
+    async end() { }
   };
 }
 module.exports = { createScopedPool };

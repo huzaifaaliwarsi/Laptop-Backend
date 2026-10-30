@@ -1,5 +1,5 @@
 // Only allocation crosses branch visibility: return a new ID, never another branch's data.
-async function migrateIdentifierAllocation(client) {
+async function migrateIdentifierAllocation(client, { grantRuntimeRole = true } = {}) {
   await client.query(`
     CREATE SEQUENCE IF NOT EXISTS public.entity_id_sequence START 1000000000;
     CREATE OR REPLACE FUNCTION public.retail_next_entity_id(
@@ -24,7 +24,9 @@ async function migrateIdentifierAllocation(client) {
       END LOOP;
     END $$;
     REVOKE ALL ON FUNCTION public.retail_next_entity_id(text,text,text,integer) FROM PUBLIC;
-    GRANT EXECUTE ON FUNCTION public.retail_next_entity_id(text,text,text,integer) TO retail_branch_runtime;
   `);
+  if (grantRuntimeRole) {
+    await client.query('GRANT EXECUTE ON FUNCTION public.retail_next_entity_id(text,text,text,integer) TO retail_branch_runtime');
+  }
 }
 module.exports = { migrateIdentifierAllocation };

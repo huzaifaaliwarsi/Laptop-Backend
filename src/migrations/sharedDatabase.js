@@ -6,22 +6,39 @@ async function migrateSharedDatabase(pool) {
   try {
     await c.query('BEGIN');
     await c.query('SELECT pg_advisory_xact_lock(884422002)');
-    await c.query(`DO $$ BEGIN
-      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'retail_branch_runtime') THEN
-        CREATE ROLE retail_branch_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
-      END IF;
-    END $$`);
-    const role = await c.query("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'retail_branch_runtime'");
-    if (role.rows[0].rolsuper || role.rows[0].rolbypassrls) throw new Error('Unsafe branch runtime role');
-    const owner = (await c.query('SELECT current_user AS name')).rows[0].name;
-    await c.query(`GRANT retail_branch_runtime TO ${quote(owner)}`);
-    await c.query('GRANT USAGE ON SCHEMA public TO retail_branch_runtime');
+
+    // Ensure core multi-tenant tables and sequences exist first
     await c.query(`CREATE TABLE IF NOT EXISTS whatsapp_auth_state (
       branch_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(branch_id,key));
       CREATE TABLE IF NOT EXISTS whatsapp_auth_leases (
       branch_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL);
       CREATE SEQUENCE IF NOT EXISTS public.entity_id_sequence START 1000000000;
       CREATE TABLE IF NOT EXISTS branch_counters (branch_id INTEGER NOT NULL, key TEXT NOT NULL, value BIGINT NOT NULL, PRIMARY KEY(branch_id,key));`);
+
+    let hasRuntimeRole = false;
+    try {
+      await c.query('SAVEPOINT role_sp');
+      await c.query(`DO $$ BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'retail_branch_runtime') THEN
+          BEGIN
+            CREATE ROLE retail_branch_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
+          EXCEPTION WHEN OTHERS THEN
+            NULL;
+          END;
+        END IF;
+      END $$`);
+      const role = await c.query("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'retail_branch_runtime'");
+      if (role.rows.length > 0 && !role.rows[0].rolsuper && !role.rows[0].rolbypassrls) {
+        const owner = (await c.query('SELECT current_user AS name')).rows[0].name;
+        await c.query(`GRANT retail_branch_runtime TO ${quote(owner)}`);
+        await c.query('GRANT USAGE ON SCHEMA public TO retail_branch_runtime');
+        hasRuntimeRole = true;
+      }
+      await c.query('RELEASE SAVEPOINT role_sp');
+    } catch (_) {
+      hasRuntimeRole = false;
+      try { await c.query('ROLLBACK TO SAVEPOINT role_sp'); } catch (e) {}
+    }
     const identityFKs = await c.query("SELECT conname FROM pg_constraint WHERE conrelid='master_staff_identities'::regclass AND contype='f'");
     for (const row of identityFKs.rows) await c.query(`ALTER TABLE master_staff_identities ALTER CONSTRAINT ${quote(row.conname)} DEFERRABLE INITIALLY DEFERRED`);
     const tables = (await c.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")).rows.map(r => r.tablename);
@@ -34,14 +51,18 @@ async function migrateSharedDatabase(pool) {
       const fkName='fk_branch_'+table;
       const existingFK=await c.query('SELECT 1 FROM pg_constraint WHERE conrelid=$1::regclass AND conname=$2',[table,fkName]);
       if(!existingFK.rows.length) await c.query(`ALTER TABLE ${t} ADD CONSTRAINT ${quote(fkName)} FOREIGN KEY(branch_id) REFERENCES master_branches(id) DEFERRABLE INITIALLY DEFERRED`);
-      await c.query(`ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY`);
-      await c.query(`DROP POLICY IF EXISTS branch_isolation ON ${t}`);
-      await c.query(`CREATE POLICY branch_isolation ON ${t} TO retail_branch_runtime
-        USING (branch_id = NULLIF(current_setting('app.branch_id', true), '')::integer)
-        WITH CHECK (branch_id = NULLIF(current_setting('app.branch_id', true), '')::integer)`);
-      await c.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ${t} TO retail_branch_runtime`);
+      if (hasRuntimeRole) {
+        await c.query(`ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY`);
+        await c.query(`DROP POLICY IF EXISTS branch_isolation ON ${t}`);
+        await c.query(`CREATE POLICY branch_isolation ON ${t} TO retail_branch_runtime
+          USING (branch_id = NULLIF(current_setting('app.branch_id', true), '')::integer)
+          WITH CHECK (branch_id = NULLIF(current_setting('app.branch_id', true), '')::integer)`);
+        await c.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ${t} TO retail_branch_runtime`);
+      }
     }
-    await c.query('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO retail_branch_runtime');
+    if (hasRuntimeRole) {
+      await c.query('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO retail_branch_runtime');
+    }
 
     await c.query(`ALTER TABLE repair_additional_work_requests ALTER COLUMN id DROP DEFAULT;
       ALTER TABLE repair_additional_work_requests ALTER COLUMN id TYPE VARCHAR(50) USING id::text;
@@ -78,7 +99,7 @@ async function migrateSharedDatabase(pool) {
       await c.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${quote('uq_branch_' + table + '_' + column)} ON ${quote(table)}(branch_id, ${quote(column)})`);
     }
     const branches=await c.query("SELECT id FROM master_branches WHERE id<>1");
-    for(const branch of branches.rows) await seedBranchCatalogs(c,branch.id);
+    for(const branch of branches.rows) await seedBranchCatalogs(c,branch.id,{seedDefaults:false});
     for (const table of ['business_settings','whatsapp_settings']) {
       await c.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${quote('uq_branch_' + table)} ON ${quote(table)}(branch_id)`);
       await c.query(`CREATE OR REPLACE FUNCTION ${quote('scope_' + table)}() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -112,7 +133,7 @@ async function migrateSharedDatabase(pool) {
         DROP TRIGGER IF EXISTS branch_references ON ${quote(table)};
         CREATE TRIGGER branch_references BEFORE INSERT OR UPDATE ON ${quote(table)} FOR EACH ROW EXECUTE FUNCTION ${quote('check_branch_' + table)}();`);
     }
-    await require('./identifierAllocation').migrateIdentifierAllocation(c);
+    await require('./identifierAllocation').migrateIdentifierAllocation(c, {grantRuntimeRole: hasRuntimeRole});
     await c.query('COMMIT');
   } catch (error) { await c.query('ROLLBACK'); throw error; }
   finally { c.release(); }

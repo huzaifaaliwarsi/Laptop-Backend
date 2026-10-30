@@ -9,25 +9,28 @@ const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/c
 // GET /api/categories - All categories aggregated (Cached 300s)
 router.get('/', cacheRoute(300), async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const [prodRes, expRes, accRes, repRes] = await Promise.all([
       db.query(`
         SELECT pc.id, pc.name, pc.code_prefix, pc.is_system, pc.custom_fields, pc.created_at,
                COUNT(p.id)::int AS product_count
         FROM product_categories pc
-        LEFT JOIN products p ON (p.category_id = pc.id OR LOWER(p.category_name) = LOWER(pc.name))
+        LEFT JOIN products p ON (p.category_id = pc.id OR LOWER(p.category_name) = LOWER(pc.name)) AND p.branch_id = $1
+        WHERE pc.branch_id = $1
         GROUP BY pc.id, pc.name, pc.code_prefix, pc.is_system, pc.custom_fields, pc.created_at
         ORDER BY pc.id ASC
-      `),
-      db.query('SELECT id, name FROM expense_categories ORDER BY id ASC'),
-      db.query('SELECT id, name FROM accessory_categories ORDER BY name ASC'),
+      `, [bId]),
+      db.query('SELECT id, name FROM expense_categories WHERE branch_id = $1 ORDER BY id ASC', [bId]),
+      db.query('SELECT id, name FROM accessory_categories WHERE branch_id = $1 ORDER BY name ASC', [bId]),
       db.query(`
         SELECT rc.id, rc.name, rc.description, rc.is_active, rc.created_at, rc.updated_at,
                COUNT(rj.id)::int AS repair_count
         FROM repair_categories rc
-        LEFT JOIN repair_jobs rj ON rj.category_id = rc.id
+        LEFT JOIN repair_jobs rj ON rj.category_id = rc.id AND rj.branch_id = $1
+        WHERE rc.branch_id = $1
         GROUP BY rc.id, rc.name, rc.description, rc.is_active, rc.created_at, rc.updated_at
         ORDER BY rc.id ASC
-      `)
+      `, [bId])
     ]);
 
     return res.json({
@@ -47,14 +50,16 @@ router.get('/', cacheRoute(300), async (req, res, next) => {
 // Product Categories
 router.get('/product', cacheRoute(300), async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const result = await db.query(`
       SELECT pc.id, pc.name, pc.code_prefix, pc.is_system, pc.custom_fields, pc.created_at,
              COUNT(p.id)::int AS product_count
       FROM product_categories pc
-      LEFT JOIN products p ON (p.category_id = pc.id OR LOWER(p.category_name) = LOWER(pc.name))
+      LEFT JOIN products p ON (p.category_id = pc.id OR LOWER(p.category_name) = LOWER(pc.name)) AND p.branch_id = $1
+      WHERE pc.branch_id = $1
       GROUP BY pc.id, pc.name, pc.code_prefix, pc.is_system, pc.custom_fields, pc.created_at
       ORDER BY pc.id ASC
-    `);
+    `, [bId]);
     return res.json({
       success: true,
       data: result.rows
@@ -66,6 +71,7 @@ router.get('/product', cacheRoute(300), async (req, res, next) => {
 
 router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { name, codePrefix, customFields } = req.body;
     if (!name || String(name).trim() === '') {
       return res.status(400).json({
@@ -79,8 +85,8 @@ router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res,
     const prefix = codePrefix ? String(codePrefix).trim().toUpperCase() : cleanName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'PRD';
     const fieldsJson = JSON.stringify(Array.isArray(customFields) ? customFields : []);
 
-    // Check duplicate
-    const existing = await db.query('SELECT id, name FROM product_categories WHERE LOWER(name) = LOWER($1)', [cleanName]);
+    // Check duplicate in same branch
+    const existing = await db.query('SELECT id, name FROM product_categories WHERE LOWER(name) = LOWER($1) AND branch_id = $2', [cleanName, bId]);
     if (existing.rows.length > 0) {
       return res.status(400).json({
         success: false,
@@ -90,12 +96,12 @@ router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res,
     }
 
     const insertRes = await db.query(
-      `INSERT INTO product_categories (name, code_prefix, is_system, custom_fields) VALUES ($1, $2, FALSE, $3::jsonb) RETURNING id, name, code_prefix, is_system, custom_fields`,
-      [cleanName, prefix, fieldsJson]
+      `INSERT INTO product_categories (name, code_prefix, is_system, custom_fields, branch_id) VALUES ($1, $2, FALSE, $3::jsonb, $4) RETURNING id, name, code_prefix, is_system, custom_fields, branch_id`,
+      [cleanName, prefix, fieldsJson, bId]
     );
 
     const newCategory = { ...insertRes.rows[0], product_count: 0 };
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.product_added', newCategory);
 
     return res.status(201).json({
@@ -110,6 +116,7 @@ router.post('/product', authenticateToken, requireSalesOrAdmin, async (req, res,
 
 router.put('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
     const { name, codePrefix, customFields } = req.body;
     if (!name || String(name).trim() === '') {
@@ -123,8 +130,8 @@ router.put('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, r
     const cleanName = String(name).trim();
     const prefix = codePrefix ? String(codePrefix).trim().toUpperCase() : cleanName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'PRD';
 
-    // Check duplicate with different ID
-    const existing = await db.query('SELECT id FROM product_categories WHERE LOWER(name) = LOWER($1) AND id != $2', [cleanName, id]);
+    // Check duplicate with different ID in same branch
+    const existing = await db.query('SELECT id FROM product_categories WHERE LOWER(name) = LOWER($1) AND id != $2 AND branch_id = $3', [cleanName, id, bId]);
     if (existing.rows.length > 0) {
       return res.status(400).json({
         success: false,
@@ -137,13 +144,13 @@ router.put('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, r
     if (customFields !== undefined) {
       const fieldsJson = JSON.stringify(Array.isArray(customFields) ? customFields : []);
       updated = await db.query(
-        `UPDATE product_categories SET name = $1, code_prefix = $2, custom_fields = $3::jsonb WHERE id = $4 RETURNING id, name, code_prefix, is_system, custom_fields`,
-        [cleanName, prefix, fieldsJson, id]
+        `UPDATE product_categories SET name = $1, code_prefix = $2, custom_fields = $3::jsonb WHERE id = $4 AND branch_id = $5 RETURNING id, name, code_prefix, is_system, custom_fields, branch_id`,
+        [cleanName, prefix, fieldsJson, id, bId]
       );
     } else {
       updated = await db.query(
-        `UPDATE product_categories SET name = $1, code_prefix = $2 WHERE id = $3 RETURNING id, name, code_prefix, is_system, custom_fields`,
-        [cleanName, prefix, id]
+        `UPDATE product_categories SET name = $1, code_prefix = $2 WHERE id = $3 AND branch_id = $4 RETURNING id, name, code_prefix, is_system, custom_fields, branch_id`,
+        [cleanName, prefix, id, bId]
       );
     }
 
@@ -155,10 +162,10 @@ router.put('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, r
     }
 
     // Update category_name in products table
-    await db.query('UPDATE products SET category_name = $1 WHERE category_id = $2', [cleanName, id]);
+    await db.query('UPDATE products SET category_name = $1 WHERE category_id = $2 AND branch_id = $3', [cleanName, id, bId]);
 
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/products*');
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
+    await CacheService.invalidateBranchPattern(bId, '/api/products*');
     emitEvent('categories.product_updated', updated.rows[0]);
 
     return res.json({
@@ -173,9 +180,10 @@ router.put('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, r
 
 router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
 
-    const catRes = await db.query('SELECT * FROM product_categories WHERE id = $1', [id]);
+    const catRes = await db.query('SELECT * FROM product_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
     if (catRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -185,10 +193,10 @@ router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req
 
     const category = catRes.rows[0];
 
-    // Check if category is used in products (by category_id or category_name)
+    // Check if category is used in products
     const inUse = await db.query(
-      'SELECT COUNT(*)::int as count FROM products WHERE category_id = $1 OR LOWER(category_name) = LOWER($2)',
-      [id, category.name]
+      'SELECT COUNT(*)::int as count FROM products WHERE (category_id = $1 OR LOWER(category_name) = LOWER($2)) AND branch_id = $3',
+      [id, category.name, bId]
     );
     const count = inUse.rows[0].count;
     if (count > 0) {
@@ -199,8 +207,8 @@ router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req
       });
     }
 
-    await db.query('DELETE FROM product_categories WHERE id = $1', [id]);
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
+    await db.query('DELETE FROM product_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.product_deleted', { id: parseInt(id, 10), name: category.name });
 
     return res.json({
@@ -215,14 +223,16 @@ router.delete('/product/:id', authenticateToken, requireSalesOrAdmin, async (req
 // Spare Part Categories
 router.get('/spare-parts', cacheRoute(300), async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const result = await db.query(`
       SELECT spc.id, spc.name, spc.code_prefix, spc.is_system, spc.created_at,
              COUNT(rp.id)::int AS part_count
       FROM spare_part_categories spc
-      LEFT JOIN repair_parts rp ON LOWER(rp.category) = LOWER(spc.name)
+      LEFT JOIN repair_parts rp ON LOWER(rp.category) = LOWER(spc.name) AND rp.branch_id = $1
+      WHERE spc.branch_id = $1
       GROUP BY spc.id, spc.name, spc.code_prefix, spc.is_system, spc.created_at
       ORDER BY spc.id ASC
-    `);
+    `, [bId]);
     return res.json({
       success: true,
       data: result.rows
@@ -234,6 +244,7 @@ router.get('/spare-parts', cacheRoute(300), async (req, res, next) => {
 
 router.post('/spare-parts', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { name, codePrefix } = req.body;
     if (!name || String(name).trim() === '') {
       return res.status(400).json({
@@ -246,7 +257,7 @@ router.post('/spare-parts', authenticateToken, requireSalesOrAdmin, async (req, 
     const cleanName = String(name).trim();
     const prefix = codePrefix ? String(codePrefix).trim().toUpperCase() : cleanName.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'PRT';
 
-    const existing = await db.query('SELECT id, name FROM spare_part_categories WHERE LOWER(name) = LOWER($1)', [cleanName]);
+    const existing = await db.query('SELECT id, name FROM spare_part_categories WHERE LOWER(name) = LOWER($1) AND branch_id = $2', [cleanName, bId]);
     if (existing.rows.length > 0) {
       return res.status(400).json({
         success: false,
@@ -256,12 +267,12 @@ router.post('/spare-parts', authenticateToken, requireSalesOrAdmin, async (req, 
     }
 
     const insertRes = await db.query(
-      `INSERT INTO spare_part_categories (name, code_prefix, is_system) VALUES ($1, $2, FALSE) RETURNING id, name, code_prefix, is_system`,
-      [cleanName, prefix]
+      `INSERT INTO spare_part_categories (name, code_prefix, is_system, branch_id) VALUES ($1, $2, FALSE, $3) RETURNING id, name, code_prefix, is_system, branch_id`,
+      [cleanName, prefix, bId]
     );
 
     const newCategory = { ...insertRes.rows[0], part_count: 0 };
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.spare_part_added', newCategory);
 
     return res.status(201).json({
@@ -276,8 +287,9 @@ router.post('/spare-parts', authenticateToken, requireSalesOrAdmin, async (req, 
 
 router.delete('/spare-parts/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
-    const catRes = await db.query('SELECT * FROM spare_part_categories WHERE id = $1', [id]);
+    const catRes = await db.query('SELECT * FROM spare_part_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
     if (catRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -286,7 +298,7 @@ router.delete('/spare-parts/:id', authenticateToken, requireSalesOrAdmin, async 
     }
 
     const category = catRes.rows[0];
-    const inUse = await db.query('SELECT COUNT(*)::int as count FROM repair_parts WHERE LOWER(category) = LOWER($1)', [category.name]);
+    const inUse = await db.query('SELECT COUNT(*)::int as count FROM repair_parts WHERE LOWER(category) = LOWER($1) AND branch_id = $2', [category.name, bId]);
     const count = inUse.rows[0].count;
     if (count > 0) {
       return res.status(400).json({
@@ -296,8 +308,8 @@ router.delete('/spare-parts/:id', authenticateToken, requireSalesOrAdmin, async 
       });
     }
 
-    await db.query('DELETE FROM spare_part_categories WHERE id = $1', [id]);
-    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
+    await db.query('DELETE FROM spare_part_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.spare_part_deleted', { id: parseInt(id, 10), name: category.name });
 
     return res.json({
@@ -312,7 +324,8 @@ router.delete('/spare-parts/:id', authenticateToken, requireSalesOrAdmin, async 
 // Expense Categories
 router.get('/expense', cacheRoute(300), async (req, res, next) => {
   try {
-    const result = await db.query('SELECT id, name FROM expense_categories ORDER BY id ASC');
+    const bId = getBranchIdFromReq(req) || 1;
+    const result = await db.query('SELECT id, name FROM expense_categories WHERE branch_id = $1 ORDER BY id ASC', [bId]);
     return res.json({
       success: true,
       data: result.rows
@@ -324,6 +337,7 @@ router.get('/expense', cacheRoute(300), async (req, res, next) => {
 
 router.post('/expense', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { name } = req.body;
     if (!name || String(name).trim() === '') {
       return res.status(400).json({
@@ -335,10 +349,11 @@ router.post('/expense', authenticateToken, requireAdmin, async (req, res, next) 
 
     const cleanName = String(name).trim();
     const insertRes = await db.query(
-      `INSERT INTO expense_categories (name) VALUES ($1) RETURNING id, name`,
-      [cleanName]
+      `INSERT INTO expense_categories (name, branch_id) VALUES ($1, $2) RETURNING id, name, branch_id`,
+      [cleanName, bId]
     );
 
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.expense_added', insertRes.rows[0]);
 
     return res.status(201).json({
@@ -353,9 +368,10 @@ router.post('/expense', authenticateToken, requireAdmin, async (req, res, next) 
 
 router.delete('/expense/:id', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
 
-    const inUse = await db.query('SELECT id FROM expenses WHERE category_id = $1 LIMIT 1', [id]);
+    const inUse = await db.query('SELECT id FROM expenses WHERE category_id = $1 AND branch_id = $2 LIMIT 1', [id, bId]);
     if (inUse.rows.length > 0) {
       return res.status(400).json({
         success: false,
@@ -364,7 +380,8 @@ router.delete('/expense/:id', authenticateToken, requireAdmin, async (req, res, 
       });
     }
 
-    await db.query('DELETE FROM expense_categories WHERE id = $1', [id]);
+    await db.query('DELETE FROM expense_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.expense_deleted', { id: parseInt(id, 10) });
 
     return res.json({
@@ -379,7 +396,8 @@ router.delete('/expense/:id', authenticateToken, requireAdmin, async (req, res, 
 // Accessory Categories
 router.get('/accessory', cacheRoute(300), async (req, res, next) => {
   try {
-    const result = await db.query('SELECT id, name FROM accessory_categories ORDER BY name ASC');
+    const bId = getBranchIdFromReq(req) || 1;
+    const result = await db.query('SELECT id, name FROM accessory_categories WHERE branch_id = $1 ORDER BY name ASC', [bId]);
     return res.json({
       success: true,
       data: result.rows
@@ -389,22 +407,50 @@ router.get('/accessory', cacheRoute(300), async (req, res, next) => {
   }
 });
 
-// ==========================================
-// REPAIR CATEGORIES (PostgreSQL master table)
-// ==========================================
+router.post('/accessory', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const bId = getBranchIdFromReq(req) || 1;
+    const { name } = req.body;
+    if (!name || String(name).trim() === '') {
+      return res.status(400).json({ success: false, code: 'MISSING_NAME', message: 'Category name is required.' });
+    }
+    const cleanName = String(name).trim();
+    const insertRes = await db.query(
+      `INSERT INTO accessory_categories (name, branch_id) VALUES ($1, $2) RETURNING id, name, branch_id`,
+      [cleanName, bId]
+    );
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
+    return res.status(201).json({ success: true, message: 'Accessory category added', data: insertRes.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
 
-// GET /api/categories/repair - List repair categories (Cached 120s)
+router.delete('/accessory/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const bId = getBranchIdFromReq(req) || 1;
+    const { id } = req.params;
+    await db.query('DELETE FROM accessory_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
+    return res.json({ success: true, message: 'Accessory category deleted' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Repair Categories
 router.get('/repair', cacheRoute(120), async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { activeOnly } = req.query;
     let queryText = `
       SELECT rc.id, rc.name, rc.description, rc.is_active, rc.created_at, rc.updated_at,
              COUNT(rj.id)::int AS repair_count
       FROM repair_categories rc
-      LEFT JOIN repair_jobs rj ON rj.category_id = rc.id
-      WHERE 1=1
+      LEFT JOIN repair_jobs rj ON rj.category_id = rc.id AND rj.branch_id = $1
+      WHERE rc.branch_id = $1
     `;
-    const params = [];
+    const params = [bId];
 
     if (activeOnly === 'true' || activeOnly === true) {
       params.push(true);
@@ -434,9 +480,9 @@ router.get('/repair', cacheRoute(120), async (req, res, next) => {
   }
 });
 
-// POST /api/categories/repair - Create repair category
 router.post('/repair', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { name, description, isActive } = req.body;
     if (!name || String(name).trim() === '') {
       return res.status(400).json({
@@ -450,8 +496,8 @@ router.post('/repair', authenticateToken, requireSalesOrAdmin, async (req, res, 
     const cleanDesc = description ? String(description).trim() : null;
     const active = isActive !== undefined ? Boolean(isActive) : true;
 
-    // Check duplicate
-    const existing = await db.query('SELECT id, name FROM repair_categories WHERE LOWER(name) = LOWER($1)', [cleanName]);
+    // Check duplicate in same branch
+    const existing = await db.query('SELECT id, name FROM repair_categories WHERE LOWER(name) = LOWER($1) AND branch_id = $2', [cleanName, bId]);
     if (existing.rows.length > 0) {
       return res.status(400).json({
         success: false,
@@ -461,10 +507,10 @@ router.post('/repair', authenticateToken, requireSalesOrAdmin, async (req, res, 
     }
 
     const insertRes = await db.query(
-      `INSERT INTO repair_categories (name, description, is_active)
-       VALUES ($1, $2, $3)
-       RETURNING id, name, description, is_active, created_at, updated_at`,
-      [cleanName, cleanDesc, active]
+      `INSERT INTO repair_categories (name, description, is_active, branch_id)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, description, is_active, created_at, updated_at, branch_id`,
+      [cleanName, cleanDesc, active, bId]
     );
 
     const newCategory = {
@@ -477,6 +523,7 @@ router.post('/repair', authenticateToken, requireSalesOrAdmin, async (req, res, 
       updatedAt: insertRes.rows[0].updated_at
     };
 
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.repair_added', newCategory);
 
     return res.status(201).json({
@@ -489,9 +536,9 @@ router.post('/repair', authenticateToken, requireSalesOrAdmin, async (req, res, 
   }
 });
 
-// PUT /api/categories/repair/:id - Update repair category
 router.put('/repair/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
     const { name, description, isActive } = req.body;
 
@@ -507,8 +554,7 @@ router.put('/repair/:id', authenticateToken, requireSalesOrAdmin, async (req, re
     const cleanDesc = description !== undefined ? (description ? String(description).trim() : null) : undefined;
     const active = isActive !== undefined ? Boolean(isActive) : undefined;
 
-    // Check duplicate with different ID
-    const existing = await db.query('SELECT id FROM repair_categories WHERE LOWER(name) = LOWER($1) AND id != $2', [cleanName, id]);
+    const existing = await db.query('SELECT id FROM repair_categories WHERE LOWER(name) = LOWER($1) AND id != $2 AND branch_id = $3', [cleanName, id, bId]);
     if (existing.rows.length > 0) {
       return res.status(400).json({
         success: false,
@@ -523,9 +569,9 @@ router.put('/repair/:id', authenticateToken, requireSalesOrAdmin, async (req, re
         description = COALESCE($2, description),
         is_active = COALESCE($3, is_active),
         updated_at = CURRENT_TIMESTAMP
-       WHERE id = $4
-       RETURNING id, name, description, is_active, created_at, updated_at`,
-      [cleanName, cleanDesc, active, id]
+       WHERE id = $4 AND branch_id = $5
+       RETURNING id, name, description, is_active, created_at, updated_at, branch_id`,
+      [cleanName, cleanDesc, active, id, bId]
     );
 
     if (updateRes.rows.length === 0) {
@@ -535,8 +581,7 @@ router.put('/repair/:id', authenticateToken, requireSalesOrAdmin, async (req, re
       });
     }
 
-    // Update category_name in repair_jobs table for historical consistency
-    await db.query('UPDATE repair_jobs SET category_name = $1 WHERE category_id = $2', [cleanName, id]);
+    await db.query('UPDATE repair_jobs SET category_name = $1 WHERE category_id = $2 AND branch_id = $3', [cleanName, id, bId]);
 
     const updatedCat = {
       id: updateRes.rows[0].id,
@@ -547,6 +592,7 @@ router.put('/repair/:id', authenticateToken, requireSalesOrAdmin, async (req, re
       updatedAt: updateRes.rows[0].updated_at
     };
 
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.repair_updated', updatedCat);
 
     return res.json({
@@ -559,11 +605,11 @@ router.put('/repair/:id', authenticateToken, requireSalesOrAdmin, async (req, re
   }
 });
 
-// PATCH /api/categories/repair/:id/toggle - Toggle active status
 router.patch('/repair/:id/toggle', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
-    const catRes = await db.query('SELECT id, is_active FROM repair_categories WHERE id = $1', [id]);
+    const catRes = await db.query('SELECT id, is_active FROM repair_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
     if (catRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -573,8 +619,8 @@ router.patch('/repair/:id/toggle', authenticateToken, requireSalesOrAdmin, async
 
     const newStatus = !catRes.rows[0].is_active;
     const updateRes = await db.query(
-      `UPDATE repair_categories SET is_active = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
-      [newStatus, id]
+      `UPDATE repair_categories SET is_active = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND branch_id = $3 RETURNING *`,
+      [newStatus, id, bId]
     );
 
     const updatedCat = {
@@ -586,6 +632,7 @@ router.patch('/repair/:id/toggle', authenticateToken, requireSalesOrAdmin, async
       updatedAt: updateRes.rows[0].updated_at
     };
 
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.repair_updated', updatedCat);
 
     return res.json({
@@ -598,11 +645,11 @@ router.patch('/repair/:id/toggle', authenticateToken, requireSalesOrAdmin, async
   }
 });
 
-// DELETE /api/categories/repair/:id - Delete category
 router.delete('/repair/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
-    const catRes = await db.query('SELECT * FROM repair_categories WHERE id = $1', [id]);
+    const catRes = await db.query('SELECT * FROM repair_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
     if (catRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -612,8 +659,7 @@ router.delete('/repair/:id', authenticateToken, requireSalesOrAdmin, async (req,
 
     const category = catRes.rows[0];
 
-    // Check if category is used in repair jobs
-    const inUse = await db.query('SELECT COUNT(*)::int as count FROM repair_jobs WHERE category_id = $1', [id]);
+    const inUse = await db.query('SELECT COUNT(*)::int as count FROM repair_jobs WHERE category_id = $1 AND branch_id = $2', [id, bId]);
     const count = inUse.rows[0].count;
     if (count > 0) {
       return res.status(400).json({
@@ -623,7 +669,8 @@ router.delete('/repair/:id', authenticateToken, requireSalesOrAdmin, async (req,
       });
     }
 
-    await db.query('DELETE FROM repair_categories WHERE id = $1', [id]);
+    await db.query('DELETE FROM repair_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
     emitEvent('categories.repair_deleted', { id: parseInt(id, 10) });
 
     return res.json({

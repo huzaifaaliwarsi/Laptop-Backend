@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireSalesOrAdmin } = require('../../middleware/rbac');
-const { CacheService, cacheRoute } = require('../../config/cache');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
 router.use(authenticateToken);
 
@@ -11,11 +11,12 @@ router.use(authenticateToken);
 router.get('/party/:partyType/:partyId', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { partyType, partyId } = req.params;
+    const branchId = getBranchIdFromReq(req);
     const isVendor = partyType.toLowerCase() === 'vendor';
 
     // 1. Fetch Party details
     const partyTable = isVendor ? 'vendors' : 'customers';
-    const partyRes = await db.query(`SELECT * FROM ${partyTable} WHERE id = $1`, [partyId]);
+    const partyRes = await db.query(`SELECT * FROM ${partyTable} WHERE id = $1 AND branch_id = $2`, [partyId, branchId]);
     if (partyRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -27,29 +28,29 @@ router.get('/party/:partyType/:partyId', requireSalesOrAdmin, cacheRoute(60), as
 
     // 2. Fetch all Invoices for this party
     const invoicesRes = await db.query(
-      `SELECT * FROM invoices WHERE party_id = $1 ORDER BY date ASC, created_at ASC`,
-      [partyId]
+      `SELECT * FROM invoices WHERE party_id = $1 AND branch_id = $2 ORDER BY date ASC, created_at ASC`,
+      [partyId, branchId]
     );
 
     // 3. Fetch all Payments for this party
     const paymentsRes = await db.query(
-      `SELECT * FROM payments WHERE party_id = $1 ORDER BY date ASC, created_at ASC`,
-      [partyId]
+      `SELECT * FROM payments WHERE party_id = $1 AND branch_id = $2 ORDER BY date ASC, created_at ASC`,
+      [partyId, branchId]
     );
 
     // 4. Fetch all Vendor Returns if vendor
     let returnsRes = { rows: [] };
     if (isVendor) {
       returnsRes = await db.query(
-        `SELECT * FROM vendor_returns WHERE vendor_id = $1 ORDER BY date ASC, created_at ASC`,
-        [partyId]
+        `SELECT * FROM vendor_returns WHERE vendor_id = $1 AND branch_id = $2 ORDER BY date ASC, created_at ASC`,
+        [partyId, branchId]
       );
     }
 
     // 5. Fetch all Accounts
     const accountsRes = await db.query(
-      `SELECT * FROM accounts WHERE party_id = $1`,
-      [partyId]
+      `SELECT * FROM accounts WHERE party_id = $1 AND branch_id = $2`,
+      [partyId, branchId]
     );
 
     // Build Grouped Bills structure

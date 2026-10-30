@@ -5,7 +5,7 @@ const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
 const { emitEvent } = require('../../config/socket');
-const { CacheService, cacheRoute } = require('../../config/cache');
+const { CacheService, cacheRoute, getBranchIdFromReq } = require('../../config/cache');
 
 router.use(authenticateToken);
 
@@ -21,18 +21,19 @@ router.get(
     try {
       const { search } = req.query;
 
-      let whereClause = '';
-      const params = [];
+      const bId = getBranchIdFromReq(req);
+      let whereClause = 'WHERE v.branch_id = $1';
+      const params = [bId];
 
       if (search && search.trim()) {
         params.push(`%${search.trim().toLowerCase()}%`);
 
-        whereClause = `
-          WHERE
+        whereClause += `
+            AND (
             LOWER(v.name) LIKE $${params.length}
             OR LOWER(COALESCE(v.contact, '')) LIKE $${params.length}
             OR LOWER(COALESCE(v.address, '')) LIKE $${params.length}
-            OR LOWER(v.id) LIKE $${params.length}
+            OR LOWER(v.id) LIKE $${params.length} )
         `;
       }
       
@@ -73,7 +74,7 @@ router.get(
         FROM vendors v
 
         LEFT JOIN accounts a
-          ON a.party_id = v.id
+          ON a.party_id = v.id AND a.branch_id = v.branch_id
 
         ${whereClause}
 

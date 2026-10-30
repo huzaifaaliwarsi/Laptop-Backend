@@ -1,4 +1,4 @@
-﻿const db = require('../config/db');
+const db = require('../config/db');
 const branchContext = require('../middleware/branchContext');
 
 function branchIdFor(client, explicitBranchId) {
@@ -51,9 +51,12 @@ async function getNextTrackingId(client = db, explicitBranchId = null) {
 }
 
 async function getNextEntityId(table, idColumn, prefix, padLength = 4, client = db) {
-  // Checks collisions across all branches, including imported IDs ahead of the sequence.
-  const result=await client.query('SELECT public.retail_next_entity_id($1,$2,$3,$4) AS id',[table,idColumn,prefix,padLength]);
-  return result.rows[0].id;
+  // Reserve atomically across branches; MAX+1 repeats IDs during concurrent saves.
+  const res = await client.query(
+    'SELECT public.retail_next_entity_id($1,$2,$3,$4) AS id',
+    [table,idColumn,prefix,padLength]
+  );
+  return res.rows[0].id;
 }
 
 module.exports={getNextProductCode,getNextInvoiceNo,getNextTrackingId,getNextEntityId};

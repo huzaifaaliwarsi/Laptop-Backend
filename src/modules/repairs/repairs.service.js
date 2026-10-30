@@ -55,7 +55,7 @@ class RepairService {
     const linesRes = await client.query('SELECT * FROM repair_job_lines WHERE repair_job_id = $1', [repairId]);
     const partsRes = await client.query('SELECT * FROM repair_parts_used WHERE repair_job_id = $1', [repairId]);
 
-    const setRes = await client.query('SELECT adjust_diagnosis_fee FROM business_settings WHERE TRUE');
+    const setRes = await client.query('SELECT adjust_diagnosis_fee FROM business_settings WHERE id = 1');
     const adjustDiagnosisFee = setRes.rows.length > 0 && setRes.rows[0].adjust_diagnosis_fee === true;
 
     const isDiagOrigin = job.origin_job_type === 'Diagnosis Job' || job.job_type === 'Diagnosis Job';
@@ -138,18 +138,20 @@ class RepairService {
       const qty = parseInt(line.quantity || 1, 10);
       const lineTotal = unitCharge * qty;
 
+      const branchId = job.branch_id || 1;
       await client.query(
-        `INSERT INTO invoice_items (invoice_id, item_type, service_id, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
-         VALUES ($1, 'service', $2, $3, $4, $5, $6, $7, 0.00, $8)`,
-        [invoiceId, line.service_id, line.service_id || (line.line_type === 'diagnosis' ? 'DIAG' : 'SERVICE'), line.name, lineDesc, qty, unitCharge, lineTotal]
+        `INSERT INTO invoice_items (invoice_id, branch_id, item_type, service_id, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
+         VALUES ($1, $9, 'service', $2, $3, $4, $5, $6, $7, 0.00, $8)`,
+        [invoiceId, line.service_id, line.service_id || (line.line_type === 'diagnosis' ? 'DIAG' : 'SERVICE'), line.name, lineDesc, qty, unitCharge, lineTotal, branchId]
       );
     }
 
+    const branchId = job.branch_id || 1;
     if (parseFloat(job.extra_charges || 0) > 0) {
       await client.query(
-        `INSERT INTO invoice_items (invoice_id, item_type, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
-         VALUES ($1, 'service', 'EXTRA', $2, $3, 1, $4, 0.00, $5)`,
-        [invoiceId, `Extra Charge — ${job.extra_reason || 'Additional Work'}`, job.extra_reason || 'Extra Charge', parseFloat(job.extra_charges), parseFloat(job.extra_charges)]
+        `INSERT INTO invoice_items (invoice_id, branch_id, item_type, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
+         VALUES ($1, $6, 'service', 'EXTRA', $2, $3, 1, $4, 0.00, $5)`,
+        [invoiceId, `Extra Charge — ${job.extra_reason || 'Additional Work'}`, job.extra_reason || 'Extra Charge', parseFloat(job.extra_charges), parseFloat(job.extra_charges), branchId]
       );
     }
 
@@ -157,9 +159,9 @@ class RepairService {
       const qty = parseInt(part.quantity || 1, 10);
       const charge = parseFloat(part.customer_charge || 0);
       await client.query(
-        `INSERT INTO invoice_items (invoice_id, item_type, product_id, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
-         VALUES ($1, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [invoiceId, part.product_id, part.product_code, part.name, `Replacement Part: ${part.name}`, qty, charge, parseFloat(part.cost_price_snapshot || 0), qty * charge]
+        `INSERT INTO invoice_items (invoice_id, branch_id, item_type, product_id, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
+         VALUES ($1, $10, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [invoiceId, part.product_id, part.product_code, part.name, `Replacement Part: ${part.name}`, qty, charge, parseFloat(part.cost_price_snapshot || 0), qty * charge, branchId]
       );
     }
 
@@ -189,7 +191,7 @@ class RepairService {
    */
   static async sendAutomatedWhatsapp(job, customMessageOrNote = '', client = db, options = {}) {
     try {
-      const settingsRes = await client.query('SELECT auto_status_notifications FROM whatsapp_settings WHERE TRUE');
+      const settingsRes = await client.query('SELECT auto_status_notifications FROM whatsapp_settings WHERE id = 1');
       if (settingsRes.rows.length > 0 && settingsRes.rows[0].auto_status_notifications === false) {
         return;
       }
@@ -428,7 +430,7 @@ class RepairService {
 
       const cleanName = customerName.trim();
       const cleanContact = contact.trim();
-      const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
+      const branchId = jobData.branchId || user?.branchId || require('../../middleware/branchContext').getBranchStore()?.branchId || 1;
 
       // Ensure customer
       let customerId = null;
@@ -1125,7 +1127,7 @@ class RepairService {
           InvoiceWhatsAppService.sendInvoiceWhatsApp(refreshed.rows[0].invoice_id).catch(e => {
             console.error('[deliverAndClose] WhatsApp repair invoice auto-send error:', e.message);
           });
-        } catch (waErr) {}
+        } catch (waErr) { }
       }
 
       return refreshed.rows[0];
@@ -1448,7 +1450,7 @@ class RepairService {
     const job = jobRes.rows[0];
 
     const linesRes = await db.query('SELECT * FROM repair_job_lines WHERE repair_job_id = $1 ORDER BY id ASC', [repairId]);
-    
+
     // If technician, mask cost_price_snapshot
     const partsRes = await db.query(
       `SELECT 
@@ -1746,7 +1748,7 @@ class RepairService {
           id, branch_id, repair_job_id, tracking_id, fault_finding, recommended_service,
           service_charge, parts_charge, total_quotation, customer_safe_note,
           parts_payload, status, quotation_snapshot, created_by, created_by_name
-        ) VALUES ($1, $14, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Pending Approval', $11, $12, $13)
+        ) VALUES ($1, $14, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'Pending Approval', $11::jsonb, $12, $13)
         RETURNING *`,
         [
           reqId, repairId, job.tracking_id, faultFinding.trim(), recommendedService.trim(),
@@ -1925,10 +1927,10 @@ class RepairService {
       try {
         let rawPayload = workRequest.parts_payload;
         if (typeof rawPayload === 'string') {
-          try { rawPayload = JSON.parse(rawPayload); } catch (_) {}
+          try { rawPayload = JSON.parse(rawPayload); } catch (_) { }
         }
         if (typeof rawPayload === 'string') {
-          try { rawPayload = JSON.parse(rawPayload); } catch (_) {}
+          try { rawPayload = JSON.parse(rawPayload); } catch (_) { }
         }
         if (Array.isArray(rawPayload)) {
           partsList = rawPayload;

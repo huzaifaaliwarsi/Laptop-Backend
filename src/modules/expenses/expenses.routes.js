@@ -18,9 +18,12 @@ router.get('/', cacheRoute(60), async (req, res, next) => {
       SELECT e.*, ec.name as category_name_rel
       FROM expenses e
       LEFT JOIN expense_categories ec ON ec.id = e.category_id
-      WHERE 1=1
+      WHERE e.branch_id = $1
     `;
-    const params = [];
+    const branchContext = require('../../middleware/branchContext');
+    const branchStore = branchContext.getBranchStore();
+    const bId = Number(req.headers['x-branch-id']) || branchStore?.branchId || req.branchId || 1;
+    const params = [bId];
 
     // Role-scoping: non-admins only see their own entries
     const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin' || req.user.isSuperAdmin;

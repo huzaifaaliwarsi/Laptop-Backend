@@ -4,6 +4,7 @@ const db = require('../../config/db');
 const authenticateToken = require('../../middleware/auth');
 const { requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
+const { getBranchIdFromReq } = require('../../config/cache');
 const { emitEvent } = require('../../config/socket');
 const RepairService = require('../repairs/repairs.service');
 const {
@@ -293,7 +294,16 @@ async function processBotReply(input, conv, client = db) {
 // GET /api/whatsapp/settings
 router.get('/settings', async (req, res, next) => {
   try {
-    const result = await db.query('SELECT * FROM whatsapp_settings WHERE TRUE');
+    const bId = getBranchIdFromReq(req) || 1;
+    let result = await db.query('SELECT * FROM whatsapp_settings WHERE branch_id = $1', [bId]);
+    if (result.rows.length === 0) {
+      await db.query(`
+        INSERT INTO whatsapp_settings (branch_id, connected, bot_enabled, human_handoff, auto_status_notifications, auto_invoice_whatsapp)
+        VALUES ($1, FALSE, TRUE, TRUE, TRUE, TRUE)
+        ON CONFLICT (branch_id) DO NOTHING
+      `, [bId]);
+      result = await db.query('SELECT * FROM whatsapp_settings WHERE branch_id = $1', [bId]);
+    }
     return res.json({
       success: true,
       data: result.rows[0] || {}
@@ -306,6 +316,7 @@ router.get('/settings', async (req, res, next) => {
 // PUT /api/whatsapp/settings
 router.put('/settings', async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { connected, number, businessName, botEnabled, humanHandoff, salesAccess, autoStatusNotifications, welcomeMessage, shopLocation, autoInvoiceWhatsapp } = req.body;
 
     const updateRes = await db.query(
@@ -321,9 +332,9 @@ router.put('/settings', async (req, res, next) => {
         shop_location = COALESCE($9, shop_location),
         auto_invoice_whatsapp = COALESCE($10, auto_invoice_whatsapp),
         updated_at = CURRENT_TIMESTAMP
-       WHERE TRUE
+       WHERE branch_id = $11
        RETURNING *`,
-      [connected, number, businessName, botEnabled, humanHandoff, salesAccess, autoStatusNotifications, welcomeMessage, shopLocation, autoInvoiceWhatsapp]
+      [connected, number, businessName, botEnabled, humanHandoff, salesAccess, autoStatusNotifications, welcomeMessage, shopLocation, autoInvoiceWhatsapp, bId]
     );
 
     emitEvent('whatsapp.settings_updated', updateRes.rows[0]);
@@ -341,13 +352,14 @@ router.put('/settings', async (req, res, next) => {
 // GET /api/whatsapp/conversations
 router.get('/conversations', async (req, res, next) => {
   try {
-    const convRes = await db.query('SELECT * FROM whatsapp_conversations ORDER BY updated_at DESC');
+    const bId = getBranchIdFromReq(req) || 1;
+    const convRes = await db.query('SELECT * FROM whatsapp_conversations WHERE branch_id = $1 ORDER BY updated_at DESC', [bId]);
     const conversations = [];
 
     for (const conv of convRes.rows) {
       const msgRes = await db.query(
-        'SELECT * FROM whatsapp_messages WHERE conversation_id = $1 ORDER BY created_at ASC',
-        [conv.id]
+        'SELECT * FROM whatsapp_messages WHERE conversation_id = $1 AND branch_id = $2 ORDER BY created_at ASC',
+        [conv.id, bId]
       );
       conversations.push({
         id: conv.id,
@@ -380,6 +392,7 @@ router.get('/conversations', async (req, res, next) => {
 // POST /api/whatsapp/conversations/simulate - Create simulated customer conversation
 router.post('/conversations/simulate', async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { name, contact, message } = req.body;
     if (!name || !contact) {
       return res.status(400).json({
@@ -393,16 +406,16 @@ router.post('/conversations/simulate', async (req, res, next) => {
     const cleanName = String(name).trim();
 
     let conv = null;
-    const existing = await db.query('SELECT * FROM whatsapp_conversations WHERE contact = $1', [cleanContact]);
+    const existing = await db.query('SELECT * FROM whatsapp_conversations WHERE contact = $1 AND branch_id = $2', [cleanContact, bId]);
     if (existing.rows.length > 0) {
       conv = existing.rows[0];
     } else {
       const convId = await getNextEntityId('whatsapp_conversations', 'id', 'CONV', 4);
       const ins = await db.query(
-        `INSERT INTO whatsapp_conversations (id, contact, name, status, lead_type)
-         VALUES ($1, $2, $3, 'Bot Active', 'General')
+        `INSERT INTO whatsapp_conversations (id, branch_id, contact, name, status, lead_type)
+         VALUES ($1, $2, $3, $4, 'Bot Active', 'General')
          RETURNING *`,
-        [convId, cleanContact, cleanName]
+        [convId, bId, cleanContact, cleanName]
       );
       conv = ins.rows[0];
     }
@@ -411,20 +424,20 @@ router.post('/conversations/simulate', async (req, res, next) => {
 
     // Insert customer message
     await db.query(
-      `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag) VALUES ($1, 'in', $2, 'customer')`,
-      [conv.id, text]
+      `INSERT INTO whatsapp_messages (conversation_id, branch_id, direction, text, tag) VALUES ($1, $2, 'in', $3, 'customer')`,
+      [conv.id, bId, text]
     );
 
     // Bot reply
     const replyText = await processBotReply(text, conv);
     if (replyText) {
       await db.query(
-        `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag) VALUES ($1, 'out', $2, 'bot')`,
-        [conv.id, replyText]
+        `INSERT INTO whatsapp_messages (conversation_id, branch_id, direction, text, tag) VALUES ($1, $2, 'out', $3, 'bot')`,
+        [conv.id, bId, replyText]
       );
       await db.query(
-        `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-        [replyText, conv.id]
+        `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND branch_id = $3`,
+        [replyText, conv.id, bId]
       );
     }
 
@@ -443,6 +456,7 @@ router.post('/conversations/simulate', async (req, res, next) => {
 // POST /api/whatsapp/messages/send - Agent sends message / template
 router.post('/messages/send', async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { conversationId, text, tag } = req.body;
     if (!conversationId || !text) {
       return res.status(400).json({
@@ -453,13 +467,13 @@ router.post('/messages/send', async (req, res, next) => {
     }
 
     await db.query(
-      `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag) VALUES ($1, 'out', $2, $3)`,
-      [conversationId, text.trim(), tag || 'agent']
+      `INSERT INTO whatsapp_messages (conversation_id, branch_id, direction, text, tag) VALUES ($1, $2, 'out', $3, $4)`,
+      [conversationId, bId, text.trim(), tag || 'agent']
     );
 
     const convRes = await db.query(
-      `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING contact`,
-      [text.trim(), conversationId]
+      `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND branch_id = $3 RETURNING contact`,
+      [text.trim(), conversationId, bId]
     );
 
     emitEvent('whatsapp.message_added', { conversationId, text: text.trim() });
@@ -467,7 +481,7 @@ router.post('/messages/send', async (req, res, next) => {
     // Send via live WhatsApp if connected
     if (convRes.rows.length > 0 && convRes.rows[0].contact) {
       const contactPhone = convRes.rows[0].contact;
-      const branchId = req.branchId || (req.user && req.user.branch_id) || 1;
+      const branchId = bId;
       try {
         if (await baileys.isBranchConnected(branchId)) {
           await baileys.sendTextMessage(branchId, contactPhone, text.trim());
@@ -490,6 +504,7 @@ router.post('/messages/send', async (req, res, next) => {
 // POST /api/whatsapp/messages/customer-input - Simulate customer typing in chat
 router.post('/messages/customer-input', async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { conversationId, text } = req.body;
     if (!conversationId || !text) {
       return res.status(400).json({
@@ -499,7 +514,7 @@ router.post('/messages/customer-input', async (req, res, next) => {
       });
     }
 
-    const convRes = await db.query('SELECT * FROM whatsapp_conversations WHERE id = $1', [conversationId]);
+    const convRes = await db.query('SELECT * FROM whatsapp_conversations WHERE id = $1 AND branch_id = $2', [conversationId, bId]);
     if (convRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -511,8 +526,8 @@ router.post('/messages/customer-input', async (req, res, next) => {
 
     // Record incoming customer message
     await db.query(
-      `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag) VALUES ($1, 'in', $2, 'customer')`,
-      [conversationId, text.trim()]
+      `INSERT INTO whatsapp_messages (conversation_id, branch_id, direction, text, tag) VALUES ($1, $2, 'in', $3, 'customer')`,
+      [conversationId, bId, text.trim()]
     );
 
     // If bot is active
@@ -520,18 +535,18 @@ router.post('/messages/customer-input', async (req, res, next) => {
       const reply = await processBotReply(text, conv);
       if (reply) {
         await db.query(
-          `INSERT INTO whatsapp_messages (conversation_id, direction, text, tag) VALUES ($1, 'out', $2, 'bot')`,
-          [conversationId, reply]
+          `INSERT INTO whatsapp_messages (conversation_id, branch_id, direction, text, tag) VALUES ($1, $2, 'out', $3, 'bot')`,
+          [conversationId, bId, reply]
         );
         await db.query(
-          `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-          [reply, conversationId]
+          `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND branch_id = $3`,
+          [reply, conversationId, bId]
         );
       }
     } else {
       await db.query(
-        `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-        [text.trim(), conversationId]
+        `UPDATE whatsapp_conversations SET last_message = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND branch_id = $3`,
+        [text.trim(), conversationId, bId]
       );
     }
 
@@ -549,8 +564,9 @@ router.post('/messages/customer-input', async (req, res, next) => {
 // PATCH /api/whatsapp/conversations/:id/handoff - Toggle human handoff
 router.patch('/conversations/:id/handoff', async (req, res, next) => {
   try {
+    const bId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
-    const convRes = await db.query('SELECT status FROM whatsapp_conversations WHERE id = $1', [id]);
+    const convRes = await db.query('SELECT status FROM whatsapp_conversations WHERE id = $1 AND branch_id = $2', [id, bId]);
     if (convRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -562,7 +578,7 @@ router.patch('/conversations/:id/handoff', async (req, res, next) => {
     const currentStatus = convRes.rows[0].status;
     const newStatus = currentStatus === 'Human Handoff' ? 'Bot Active' : 'Human Handoff';
 
-    await db.query('UPDATE whatsapp_conversations SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newStatus, id]);
+    await db.query('UPDATE whatsapp_conversations SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND branch_id = $3', [newStatus, id, bId]);
     emitEvent('whatsapp.conversation_updated', { conversationId: id, status: newStatus });
 
     return res.json({

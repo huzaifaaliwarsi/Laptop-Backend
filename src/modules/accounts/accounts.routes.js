@@ -119,8 +119,11 @@ router.get('/drawer-transactions', requireSalesOrAdmin, cacheRoute(60), async (r
 router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { type, partyType, partyId, status } = req.query;
-    let queryText = 'SELECT * FROM accounts WHERE 1=1';
-    const params = [];
+    const branchContext = require('../../middleware/branchContext');
+    const branchStore = branchContext.getBranchStore();
+    const bId = Number(req.headers['x-branch-id']) || branchStore?.branchId || req.branchId || 1;
+    let queryText = 'SELECT * FROM accounts WHERE branch_id = $1';
+    const params = [bId];
 
     if (type) {
       params.push(type);

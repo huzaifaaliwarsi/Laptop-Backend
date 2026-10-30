@@ -5,7 +5,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
  * Ultra-Fast High-Performance In-Memory Cache Engine
  * Operates directly in server RAM with 0.01ms access time.
  * Eliminates all external network hops, TLS handshakes, and third-party latency.
- * Works seamlessly and reliably with Neon PostgreSQL.
+ * Works seamlessly and reliably with PostgreSQL.
  */
 class InMemoryCache {
   constructor() {
@@ -47,7 +47,7 @@ class InMemoryCache {
 
 const memoryStore = new InMemoryCache();
 
-console.log('⚡ [Cache Engine] Active: Ultra-Fast High-Performance In-Memory Cache (0.01ms latency, direct Neon DB).');
+console.log('⚡ [Cache Engine] Active: Ultra-Fast High-Performance In-Memory Cache (0.01ms latency).');
 
 const CacheService = {
   async get(key) {
@@ -110,6 +110,22 @@ const CacheService = {
   }
 };
 
+/**
+ * Extract the verified branch ID for the current request.
+ * Priority: resolved AsyncLocalStorage context > middleware branch > authenticated user.
+ *
+ * @param {import('express').Request} req
+ * @returns {number} verified branchId; missing context is an error.
+ */
+function getBranchIdFromReq(req) {
+  const { getBranchStore } = require('../middleware/branchContext');
+  const store = getBranchStore();
+  const id = Number(store?.branchId || req.branchId || req.user?.branchId || req.user?.branch_id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    throw Object.assign(new Error('Verified branch context is missing'), { status: 400 });
+  }
+  return id;
+}
 // Express route caching middleware
 function cacheRoute(ttlSeconds = 60, customKeyFn = null) {
   return (req, res, next) => {
@@ -118,25 +134,9 @@ function cacheRoute(ttlSeconds = 60, customKeyFn = null) {
       return next();
     }
 
-    const { getBranchStore } = require('../middleware/branchContext');
-    const branchStore = getBranchStore();
-
     // Derive verified branch scope strictly from authenticated execution context
-    let branchScope = null;
-    if (req.user?.isSuperAdmin || branchStore?.isSuperAdmin) {
-      if (req.headers['x-branch-id']) {
-        const headerBId = parseInt(req.headers['x-branch-id'], 10);
-        branchScope = !isNaN(headerBId) ? `branch_${headerBId}` : 'sa_all';
-      } else {
-        branchScope = 'sa_all';
-      }
-    } else {
-      const verifiedBranchId = branchStore?.branchId || req.user?.branchId || req.branchId;
-      if (!verifiedBranchId) {
-        return next();
-      }
-      branchScope = `branch_${verifiedBranchId}`;
-    }
+    const activeBId = getBranchIdFromReq(req);
+    const branchScope = `branch_${activeBId}`;
 
     const role = req.user?.role || 'anon';
     const userId = req.user?.id || 'anon';
@@ -154,7 +154,6 @@ function cacheRoute(ttlSeconds = 60, customKeyFn = null) {
     const fullPath = `${req.baseUrl || ''}${req.path || ''}`;
 
     // Only include userId in cache key if the endpoint is strictly personal to the user (e.g. /me, personal queues)
-    // Branch-wide data (products, categories, invoices, settings, customers, vendors) is shared across branch staff
     const isPersonalEndpoint = fullPath.includes('/me') || fullPath.includes('/my-') || fullPath.includes('/profile');
     const userScope = isPersonalEndpoint ? `:${userId}` : '';
 
@@ -182,30 +181,6 @@ function cacheRoute(ttlSeconds = 60, customKeyFn = null) {
 
     next();
   };
-}
-
-/**
- * Extract the verified branch ID for the current request.
- * Priority: AsyncLocalStorage branchStore > req.user.branchId > req.branchId
- *
- * @param {import('express').Request} req
- * @returns {number|null} branchId or null if super-admin all-branches context
- */
-function getBranchIdFromReq(req) {
-  try {
-    const { getBranchStore } = require('../middleware/branchContext');
-    const branchStore = getBranchStore();
-    if (req.user?.isSuperAdmin || branchStore?.isSuperAdmin) {
-      if (req.headers && req.headers['x-branch-id']) {
-        const hb = parseInt(req.headers['x-branch-id'], 10);
-        return !isNaN(hb) ? hb : null;
-      }
-      return null;
-    }
-    return branchStore?.branchId || req.user?.branchId || req.branchId || null;
-  } catch {
-    return req.user?.branchId || req.branchId || null;
-  }
 }
 
 module.exports = {

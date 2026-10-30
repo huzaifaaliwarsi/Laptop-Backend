@@ -254,12 +254,12 @@ class InvoiceService {
       for (const pItem of processedItems) {
         await client.query(
           `INSERT INTO invoice_items (
-            invoice_id, item_type, product_id, code, name, description, quantity,
+            invoice_id, branch_id, item_type, product_id, code, name, description, quantity,
             unit_price, cost_price_snapshot, line_total
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          ) VALUES ($1, $11, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
           [
             invoiceId, pItem.itemType || 'product', pItem.productId, pItem.code, pItem.name, pItem.description,
-            pItem.quantity, pItem.unitPrice, pItem.costPriceSnapshot, pItem.lineTotal
+            pItem.quantity, pItem.unitPrice, pItem.costPriceSnapshot, pItem.lineTotal, branchId
           ]
         );
       }
@@ -412,14 +412,14 @@ class InvoiceService {
 
         await client.query(
           `INSERT INTO invoice_items (
-            invoice_id, item_type, product_id, code, name, description, quantity,
+            invoice_id, branch_id, item_type, product_id, code, name, description, quantity,
             unit_price, cost_price_snapshot, line_total
-          ) VALUES ($1, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
+          ) VALUES ($1, $10, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
           [
             invoiceId, mergeResult.product.id, mergeResult.product.code,
             `${mergeResult.product.brand} ${mergeResult.product.model}`.trim(),
             `${mergeResult.product.category_name} — ${mergeResult.product.brand} ${mergeResult.product.model}`,
-            qty, costPrice, costPrice, qty * costPrice
+            qty, costPrice, costPrice, qty * costPrice, branchId
           ]
         );
 
@@ -570,14 +570,14 @@ class InvoiceService {
 
         await client.query(
           `INSERT INTO invoice_items (
-            invoice_id, item_type, product_id, code, name, description, quantity,
+            invoice_id, branch_id, item_type, product_id, code, name, description, quantity,
             unit_price, cost_price_snapshot, line_total
-          ) VALUES ($1, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
+          ) VALUES ($1, $10, 'product', $2, $3, $4, $5, $6, $7, $8, $9)`,
           [
             invoiceId, mergeResult.product.id, mergeResult.product.code,
             `${mergeResult.product.brand} ${mergeResult.product.model}`.trim(),
             `${mergeResult.product.category_name} — ${mergeResult.product.brand} ${mergeResult.product.model}`,
-            qty, costPrice, costPrice, qty * costPrice
+            qty, costPrice, costPrice, qty * costPrice, branchId
           ]
         );
 
@@ -771,24 +771,24 @@ class InvoiceService {
 
       // Add items
       await client.query(
-        `INSERT INTO invoice_items (invoice_id, item_type, product_id, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
-         VALUES ($1, 'product', $2, $3, $4, $5, 1, $6, $7, $8)`,
+        `INSERT INTO invoice_items (invoice_id, branch_id, item_type, product_id, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
+         VALUES ($1, $9, 'product', $2, $3, $4, $5, 1, $6, $7, $8)`,
         [
           invoiceId, shopProduct.id, shopProduct.code,
           `${shopProduct.brand} ${shopProduct.model}`.trim(),
           `Shop product given: ${shopProduct.category_name} — ${shopProduct.brand} ${shopProduct.model}`,
-          sVal, parseFloat(shopProduct.cost_price || 0), sVal
+          sVal, parseFloat(shopProduct.cost_price || 0), sVal, branchId
         ]
       );
 
       await client.query(
-        `INSERT INTO invoice_items (invoice_id, item_type, product_id, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
-         VALUES ($1, 'product', $2, $3, $4, $5, 1, $6, $7, $8)`,
+        `INSERT INTO invoice_items (invoice_id, branch_id, item_type, product_id, code, name, description, quantity, unit_price, cost_price_snapshot, line_total)
+         VALUES ($1, $9, 'product', $2, $3, $4, $5, 1, $6, $7, $8)`,
         [
           invoiceId, recResult.product.id, recResult.product.code,
           `${recResult.product.brand} ${recResult.product.model}`.trim(),
           `Customer product received: ${recResult.product.category_name} — ${recResult.product.brand} ${recResult.product.model}`,
-          cVal, parseFloat(recResult.product.cost_price || 0), cVal
+          cVal, parseFloat(recResult.product.cost_price || 0), cVal, branchId
         ]
       );
 
