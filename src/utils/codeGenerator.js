@@ -51,12 +51,8 @@ async function getNextTrackingId(client = db, explicitBranchId = null) {
 }
 
 async function getNextEntityId(table, idColumn, prefix, padLength = 4, client = db) {
-  // Reserve atomically across branches; MAX+1 repeats IDs during concurrent saves.
-  const res = await client.query(
-    'SELECT public.retail_next_entity_id($1,$2,$3,$4) AS id',
-    [table,idColumn,prefix,padLength]
-  );
-  return res.rows[0].id;
+  const branchId = branchIdFor(client);
+  return nextBusinessCode(client, branchId, table, idColumn, prefix, padLength);
 }
 
-module.exports={getNextProductCode,getNextInvoiceNo,getNextTrackingId,getNextEntityId};
+module.exports={getNextProductCode,getNextInvoiceNo,getNextTrackingId,getNextEntityId,nextBusinessCode};

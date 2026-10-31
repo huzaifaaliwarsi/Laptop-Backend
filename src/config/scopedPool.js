@@ -11,14 +11,6 @@ function createScopedPool(pool, branchId) {
     async function begin() {
       await raw.query('BEGIN');
       inTransaction = true;
-      await raw.query(`
-        DO $$
-        BEGIN
-          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'retail_branch_runtime') THEN
-            EXECUTE 'SET LOCAL ROLE retail_branch_runtime';
-          END IF;
-        END $$;
-      `);
       await raw.query("SELECT set_config('app.branch_id', $1, true)", [String(id)]);
     }
     async function execute(sql, params) {

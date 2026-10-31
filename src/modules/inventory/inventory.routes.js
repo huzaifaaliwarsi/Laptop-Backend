@@ -1054,7 +1054,8 @@ router.post('/bulk-csv', requireAdmin, async (req, res, next) => {
 router.delete('/:id', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const prodRes = await db.query('SELECT * FROM products WHERE id = $1', [id]);
+    const branchId = getBranchIdFromReq(req) || 1;
+    const prodRes = await db.query('SELECT * FROM products WHERE id = $1 AND (branch_id = $2 OR branch_id IS NULL)', [id, branchId]);
     if (prodRes.rows.length === 0) {
       return res.status(404).json({
         success: false,
