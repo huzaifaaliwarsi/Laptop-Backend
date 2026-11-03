@@ -116,7 +116,7 @@ async function migrateSharedDatabase(pool) {
       WHERE f.contype='f' AND n.nspname='public' AND array_length(f.conkey,1)=1`);
     for (const table of scoped) {
       let checks = refs.rows.filter(r => r.child === table && scoped.includes(r.parent)).map(r => `
-        IF NEW.${quote(r.column)} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.${quote(r.parent)} p WHERE p.${quote(r.target)} = NEW.${quote(r.column)} AND p.branch_id = NEW.branch_id) THEN
+        IF (TG_OP = 'INSERT' OR NEW.${quote(r.column)} IS DISTINCT FROM OLD.${quote(r.column)}) AND NEW.${quote(r.column)} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.${quote(r.parent)} p WHERE p.${quote(r.target)} = NEW.${quote(r.column)} AND p.branch_id = NEW.branch_id) THEN
           RAISE EXCEPTION 'Invalid cross-branch reference: ${table}.${r.column}' USING ERRCODE='23503'; END IF;`).join('\n');
       if (['invoices','accounts','payments'].includes(table)) checks += `
         IF NEW.party_id IS NOT NULL AND LOWER(NEW.party_type) = 'customer' AND NOT EXISTS (SELECT 1 FROM public.customers p WHERE p.id=NEW.party_id AND p.branch_id=NEW.branch_id) THEN

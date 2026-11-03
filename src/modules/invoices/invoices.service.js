@@ -3,6 +3,8 @@ const { getNextInvoiceNo, getNextEntityId } = require('../../utils/codeGenerator
 const { validateOutflow } = require('../../utils/financialFormulas');
 const InventoryService = require('../inventory/inventory.service');
 const { emitEvent } = require('../../config/socket');
+const { getCreator, resolveSafeCreator } = require('../../utils/userHelper');
+const { resolveOrCreateCustomer } = require('../../utils/customerHelper');
 
 function paymentStatus(total, paid, settled = false) {
   if (settled) return 'Settled';
@@ -34,14 +36,6 @@ function normalizeInvoiceRow(row) {
   };
 }
 
-function getCreator(user) {
-  const isSuper = user?.role === 'super_admin' || user?.isSuperAdmin;
-  return {
-    id: isSuper ? null : (user?.id || null),
-    name: user?.name || (isSuper ? 'Platform Super Admin' : (user?.username || 'Staff'))
-  };
-}
-
 class InvoiceService {
   /**
    * Complete atomic POS retail sale
@@ -64,26 +58,17 @@ class InvoiceService {
 
       const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
 
-      // Ensure customer exists
-      let customerId = reqCustId;
-      const cleanName = customerName.trim();
-      const cleanContact = contact ? contact.trim() : null;
-
-      if (!customerId) {
-        const custRes = await client.query(
-          `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2) AND branch_id = $3`,
-          [cleanName, cleanContact, branchId]
-        );
-        if (custRes.rows.length > 0) {
-          customerId = custRes.rows[0].id;
-        } else {
-          customerId = await getNextEntityId('customers', 'id', 'CUS', 4, client);
-          await client.query(
-            `INSERT INTO customers (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)`,
-            [customerId, cleanName, cleanContact, branchId]
-          );
-        }
-      }
+      // Ensure customer exists (matches by explicit ID, contact number, or name)
+      const cust = await resolveOrCreateCustomer({
+        customerId: reqCustId,
+        customerName,
+        contact,
+        branchId,
+        client
+      });
+      const customerId = cust.customerId;
+      const cleanName = cust.name;
+      const cleanContact = cust.contact;
 
       const invoiceNo = await getNextInvoiceNo('sale', client, branchId);
       const invoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
@@ -112,6 +97,7 @@ class InvoiceService {
           processedItems.push({
             itemType: 'service',
             productId: null,
+            category: 'Service',
             code: item.code || 'SRV',
             name: item.name ? item.name.trim() : 'Service / Software Charge',
             description: item.description ? item.description.trim() : 'Service / Software Charge',
@@ -153,6 +139,7 @@ class InvoiceService {
           processedItems.push({
             itemType: 'custom_product',
             productId: null,
+            category: item.category || 'Custom Product',
             code: item.code || 'CUSTOM',
             name: item.name ? item.name.trim() : 'Custom Sourced Product',
             description: item.description ? item.description.trim() : 'Direct Sourced Custom Item',
@@ -207,6 +194,7 @@ class InvoiceService {
           processedItems.push({
             itemType: 'product',
             productId: product.id,
+            category: product.category_name || 'Product',
             code: product.code,
             name: `${product.brand} ${product.model || product.product_name || ''}`.trim(),
             description: `${product.category_name} — ${product.brand} ${product.model} | ${product.specifications || ''}`,
@@ -230,7 +218,7 @@ class InvoiceService {
         throw error;
       }
 
-      const creator = getCreator(user);
+      const creator = await resolveSafeCreator(user, branchId, client);
 
       // Insert invoice
       const invoiceRes = await client.query(
@@ -298,8 +286,11 @@ class InvoiceService {
 
       emitEvent('invoice.created', invoiceRes.rows[0]);
 
+      const normalizedInv = normalizeInvoiceRow(invoiceRes.rows[0]);
+      normalizedInv.items = processedItems;
+
       return {
-        invoice: normalizeInvoiceRow(invoiceRes.rows[0]),
+        invoice: normalizedInv,
         items: processedItems
       };
     });
@@ -375,7 +366,7 @@ class InvoiceService {
       const invoiceNo = await getNextInvoiceNo('vendor_purchase', client, branchId);
       const invoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
       const payStatus = paymentStatus(total, paid);
-      const creator = getCreator(user);
+      const creator = await resolveSafeCreator(user, branchId, client);
 
       const invoiceRes = await client.query(
         `INSERT INTO invoices (
@@ -458,9 +449,13 @@ class InvoiceService {
 
       emitEvent('invoice.created', invoiceRes.rows[0]);
 
+      const normalizedInv = normalizeInvoiceRow(invoiceRes.rows[0]);
+      normalizedInv.items = processedItems;
+
       return {
-        invoice: normalizeInvoiceRow(invoiceRes.rows[0]),
-        products: processedItems
+        invoice: normalizedInv,
+        products: processedItems,
+        items: processedItems
       };
     });
 
@@ -501,26 +496,17 @@ class InvoiceService {
 
       const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
 
-      let customerId = reqCustId;
-      const cleanName = customerName.trim();
-      const rawContact = purchaseData.customerContact || purchaseData.contact;
-      const cleanContact = rawContact ? String(rawContact).trim() : null;
-
-      if (!customerId) {
-        const custRes = await client.query(
-          `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2) AND branch_id = $3`,
-          [cleanName, cleanContact, branchId]
-        );
-        if (custRes.rows.length > 0) {
-          customerId = custRes.rows[0].id;
-        } else {
-          customerId = await getNextEntityId('customers', 'id', 'CUS', 4, client);
-          await client.query(
-            `INSERT INTO customers (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)`,
-            [customerId, cleanName, cleanContact, branchId]
-          );
-        }
-      }
+      // Ensure customer exists (matches by explicit ID, contact number, or name)
+      const cust = await resolveOrCreateCustomer({
+        customerId: reqCustId,
+        customerName,
+        contact: purchaseData.customerContact || purchaseData.contact,
+        branchId,
+        client
+      });
+      const customerId = cust.customerId;
+      const cleanName = cust.name;
+      const cleanContact = cust.contact;
 
       const total = lines.reduce((sum, line) => sum + (parseInt(line.quantity || 1, 10) * parseFloat(line.costPrice || 0)), 0);
       const paid = Math.min(parseFloat(reqPaid || 0), total);
@@ -534,6 +520,7 @@ class InvoiceService {
       const invoiceNo = await getNextInvoiceNo('customer_purchase', client, branchId);
       const invoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
       const payStatus = paymentStatus(total, paid);
+      const creator = await resolveSafeCreator(user, branchId, client);
 
       const invoiceRes = await client.query(
         `INSERT INTO invoices (
@@ -548,7 +535,7 @@ class InvoiceService {
         [
           invoiceId, invoiceNo, date || new Date(), customerId, cleanName, cleanContact,
           total, total, paid, paid, balance, pMethod,
-          referenceId || null, payStatus, user.id, user.name, branchId
+          referenceId || null, payStatus, creator.id, creator.name, branchId
         ]
       );
 
@@ -598,7 +585,7 @@ class InvoiceService {
           )`,
           [
             payId, invoiceId, invoiceNo, customerId, cleanName,
-            paid, date || new Date(), pMethod, referenceId || null, user.id, user.name, branchId
+            paid, date || new Date(), pMethod, referenceId || null, creator.id, creator.name, branchId
           ]
         );
       }
@@ -616,9 +603,13 @@ class InvoiceService {
 
       emitEvent('invoice.created', invoiceRes.rows[0]);
 
+      const normalizedInv = normalizeInvoiceRow(invoiceRes.rows[0]);
+      normalizedInv.items = processedItems;
+
       return {
-        invoice: normalizeInvoiceRow(invoiceRes.rows[0]),
-        products: processedItems
+        invoice: normalizedInv,
+        products: processedItems,
+        items: processedItems
       };
     });
 
@@ -679,23 +670,17 @@ class InvoiceService {
 
       const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
 
-      let customerId = reqCustId;
-      const cleanName = customerName.trim();
-      const rawContact = contact || exchangeData.customerContact;
-      const cleanContact = rawContact ? String(rawContact).trim() : null;
-
-      if (!customerId) {
-        const custRes = await client.query(
-          `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2) AND branch_id = $3`,
-          [cleanName, cleanContact, branchId]
-        );
-        if (custRes.rows.length > 0) {
-          customerId = custRes.rows[0].id;
-        } else {
-          customerId = await getNextEntityId('customers', 'id', 'CUS', 4, client);
-          await client.query(`INSERT INTO customers (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)`, [customerId, cleanName, cleanContact, branchId]);
-        }
-      }
+      // Ensure customer exists (matches by explicit ID, contact number, or name)
+      const cust = await resolveOrCreateCustomer({
+        customerId: reqCustId,
+        customerName,
+        contact: contact || exchangeData.customerContact,
+        branchId,
+        client
+      });
+      const customerId = cust.customerId;
+      const cleanName = cust.name;
+      const cleanContact = cust.contact;
 
       const sVal = parseFloat(exchangeData.shopValue || exchangeData.outSaleValue || shopProduct.expected_sale_price || shopProduct.cost_price || 0);
       const cVal = parseFloat(exchangeData.customerValue || exchangeData.inValue || receivedProduct.costPrice || 0);
@@ -751,6 +736,8 @@ class InvoiceService {
       receivedProduct.branchId = branchId;
       const recResult = await InventoryService.addOrMergeProduct(receivedProduct, sourceData, user, client);
 
+      const creator = await resolveSafeCreator(user, branchId, client);
+
       // Create exchange invoice
       const invoiceRes = await client.query(
         `INSERT INTO invoices (
@@ -765,7 +752,7 @@ class InvoiceService {
         [
           invoiceId, invoiceNo, date || new Date(), customerId, cleanName, cleanContact,
           exchangeCase, difference, difference, paid, paid, balance,
-          pMethod, referenceId || null, payStatus, user.id, user.name, branchId
+          pMethod, referenceId || null, payStatus, creator.id, creator.name, branchId
         ]
       );
 
@@ -809,7 +796,7 @@ class InvoiceService {
           )`,
           [
             payId, invoiceId, invoiceNo, customerId, cleanName, accountType,
-            direction, paid, date || new Date(), pMethod, referenceId || null, user.id, user.name, branchId
+            direction, paid, date || new Date(), pMethod, referenceId || null, creator.id, creator.name, branchId
           ]
         );
       }
@@ -828,10 +815,39 @@ class InvoiceService {
 
       emitEvent('invoice.created', invoiceRes.rows[0]);
 
+      const normalizedInv = normalizeInvoiceRow(invoiceRes.rows[0]);
+      normalizedInv.shopProduct = shopProduct;
+      normalizedInv.receivedProduct = recResult.product;
+      normalizedInv.items = [
+        {
+          itemType: 'product',
+          productId: shopProduct.id,
+          category: shopProduct.category_name || 'Product',
+          code: shopProduct.code,
+          name: `${shopProduct.brand} ${shopProduct.model || ''}`.trim(),
+          description: `Given to Customer: ${shopProduct.brand} ${shopProduct.model}`,
+          quantity: 1,
+          unitPrice: shopProductSalePrice,
+          lineTotal: shopProductSalePrice
+        },
+        {
+          itemType: 'product',
+          productId: recResult.product.id,
+          category: recResult.product.category_name || 'Product',
+          code: recResult.product.code,
+          name: `${recResult.product.brand} ${recResult.product.model || ''}`.trim(),
+          description: `Taken in Exchange: ${recResult.product.brand} ${recResult.product.model}`,
+          quantity: 1,
+          unitPrice: -receivedProductValue,
+          lineTotal: -receivedProductValue
+        }
+      ];
+
       return {
-        invoice: normalizeInvoiceRow(invoiceRes.rows[0]),
+        invoice: normalizedInv,
         shopProduct,
-        receivedProduct: recResult.product
+        receivedProduct: recResult.product,
+        items: normalizedInv.items
       };
     });
 
@@ -879,6 +895,7 @@ class InvoiceService {
 
       const invType = invoice.type || invoice.type_key;
       const branchId = invoice.branch_id || user?.branchId || 1;
+      const creator = await resolveSafeCreator(user, branchId, client);
 
       if (invType === 'Customer Purchase') {
         // Customer Purchase / Buyback: items were added to stock, so voiding removes them from stock
@@ -912,7 +929,7 @@ class InvoiceService {
             [
               payId, invoice.id, invoice.invoice_no, invoice.party_id, invoice.party_name,
               refundAmount, date || new Date(), rMethod, referenceId ? referenceId.trim() : null,
-              `Customer Buyback Reversal / Void: ${reason.trim()}`, user.id, user.name, branchId
+              `Customer Buyback Reversal / Void: ${reason.trim()}`, creator.id, creator.name, branchId
             ]
           );
         }
@@ -986,7 +1003,7 @@ class InvoiceService {
             [
               payId, invoice.id, invoice.invoice_no, invoice.party_id, invoice.party_name,
               refundAmount, date || new Date(), rMethod, referenceId ? referenceId.trim() : null,
-              `Sales Void Refund: ${reason.trim()}`, user.id, user.name, branchId
+              `Sales Void Refund: ${reason.trim()}`, creator.id, creator.name, branchId
             ]
           );
         }
@@ -1009,7 +1026,7 @@ class InvoiceService {
          RETURNING *`,
         [
           date || new Date(), reason.trim(), refundAmount, rMethod,
-          referenceId ? referenceId.trim() : null, user.id, id
+          referenceId ? referenceId.trim() : null, creator.id, id
         ]
       );
 
@@ -1050,6 +1067,7 @@ class InvoiceService {
       }
       const product = prodRes.rows[0];
       const branchId = require('../../middleware/branchContext').getBranchStore()?.branchId || user?.branchId || 1;
+      const creator = await resolveSafeCreator(user, branchId, client);
 
       if (qty > product.current_stock) {
         const error = new Error(`Only ${product.current_stock} unit(s) available in stock to return.`);
@@ -1179,7 +1197,7 @@ class InvoiceService {
                 payId, returnId, vendor.id, vendor.name, priceDiff, date || new Date(),
                 diffMethod, referenceId || null,
                 `Upgrade difference paid to vendor for replacement (${repProduct?.code || ''})`,
-                user.id, user.name, branchId
+                creator.id, creator.name, branchId
               ]);
             } else {
               const accId = await getNextEntityId('accounts', 'id', 'ACC', 4, client);
@@ -1251,7 +1269,7 @@ class InvoiceService {
           repProduct ? parseFloat(repProduct.cost_price || 0) : 0,
           repProduct ? parseFloat(repProduct.expected_sale_price || 0) : 0,
           balance, method, method, referenceId ? referenceId.trim() : null,
-          reason ? reason.trim() : null, date || new Date(), retStatus, user.id, user.name, branchId
+          reason ? reason.trim() : null, date || new Date(), retStatus, creator.id, creator.name, branchId
         ]
       );
 
@@ -1320,7 +1338,7 @@ class InvoiceService {
             (method === 'Exchange Credit' || method === 'Exchange' || method === 'Product Replacement / Exchange') ? 'Adjusted' : 'Received',
             initialSettlement, date || new Date(), method, referenceId || null,
             (method === 'Exchange Credit' || method === 'Exchange' || method === 'Product Replacement / Exchange') ? `Replacement product: ${repProduct?.code || ''}` : 'Initial vendor return refund',
-            method === 'Cash' || method === 'Online', user.id, user.name, branchId
+            method === 'Cash' || method === 'Online', creator.id, creator.name, branchId
           ]
         );
       }
@@ -1340,7 +1358,11 @@ class InvoiceService {
     const invoice = invRes.rows[0];
 
     const itemsRes = await db.query(
-      `SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY id ASC`,
+      `SELECT ii.*, COALESCE(p.category_name, rp.category) as category
+       FROM invoice_items ii
+       LEFT JOIN products p ON p.id = ii.product_id
+       LEFT JOIN repair_parts rp ON rp.id = ii.product_id
+       WHERE ii.invoice_id = $1 ORDER BY ii.id ASC`,
       [invoice.id]
     );
 
@@ -1489,6 +1511,7 @@ class InvoiceService {
           productCode: item.code,
           hsCode: item.hs_code || item.code || '—',
           name: item.name,
+          category: item.category || (item.item_type === 'service' ? 'Service' : (item.description && item.description.includes('—') ? item.description.split('—')[0].trim() : (item.item_type === 'custom_product' ? 'Custom Item' : 'Product'))),
           description: item.description,
           quantity: qty,
           rate: rate,

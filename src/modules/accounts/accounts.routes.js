@@ -171,6 +171,277 @@ router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   }
 });
 
+// GET /api/accounts/vendor/:vendorId/open-bills - Get all open payable bills for a vendor
+router.get('/vendor/:vendorId/open-bills', requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const { vendorId } = req.params;
+    const branchId = getBranchIdFromReq(req) || 1;
+
+    // Fetch vendor info
+    const vRes = await db.query(
+      'SELECT id, name, contact FROM vendors WHERE id = $1 AND branch_id = $2',
+      [vendorId, branchId]
+    );
+    if (vRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        code: 'VENDOR_NOT_FOUND',
+        message: 'Vendor not found.'
+      });
+    }
+    const vendor = vRes.rows[0];
+
+    // Fetch all open accounts for this vendor with linked invoice info
+    const query = `
+      SELECT 
+        a.id AS account_id,
+        a.type AS account_type,
+        a.invoice_id,
+        a.invoice_no,
+        a.amount AS original_amount,
+        a.remaining,
+        a.status,
+        a.date,
+        a.created_at,
+        i.type AS invoice_type,
+        i.total AS invoice_total,
+        i.paid AS invoice_paid,
+        i.balance AS invoice_balance
+      FROM accounts a
+      LEFT JOIN invoices i ON i.id = a.invoice_id AND i.branch_id = a.branch_id
+      WHERE a.party_id = $1 
+        AND a.branch_id = $2 
+        AND a.type = 'Vendor Payable' 
+        AND a.status = 'Open'
+        AND a.remaining > 0.005
+      ORDER BY a.date ASC, a.created_at ASC
+    `;
+    const accRes = await db.query(query, [vendorId, branchId]);
+
+    const bills = accRes.rows.map(row => ({
+      accountId: row.account_id,
+      invoiceId: row.invoice_id,
+      invoiceNo: row.invoice_no,
+      date: row.date,
+      originalAmount: parseFloat(row.original_amount || 0),
+      remaining: parseFloat(row.remaining || 0),
+      invoiceTotal: parseFloat(row.invoice_total || row.original_amount || 0),
+      invoicePaid: parseFloat(row.invoice_paid || 0),
+      invoiceBalance: parseFloat(row.invoice_balance || row.remaining || 0)
+    }));
+
+    const totalPayable = bills.reduce((sum, b) => sum + b.remaining, 0);
+
+    return res.json({
+      success: true,
+      data: {
+        vendor: {
+          id: vendor.id,
+          name: vendor.name,
+          contact: vendor.contact
+        },
+        bills,
+        totalPayable: parseFloat(totalPayable.toFixed(2)),
+        openBillsCount: bills.length
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/accounts/vendor-group-payment - Record lump-sum / multi-bill payment to a vendor
+router.post('/vendor-group-payment', requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const { vendorId, amount: reqAmount, paymentMethod, referenceId, notes, date, allocations } = req.body;
+    const branchId = getBranchIdFromReq(req) || 1;
+
+    const payAmount = parseFloat(reqAmount || 0);
+    if (isNaN(payAmount) || payAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        code: 'INVALID_AMOUNT',
+        message: 'Payment amount must be greater than zero.'
+      });
+    }
+
+    const pMethod = paymentMethod === 'Online' ? 'Online' : 'Cash';
+
+    const result = await db.withTransaction(async (client) => {
+      // 1. Fetch vendor
+      const vRes = await client.query(
+        'SELECT id, name FROM vendors WHERE id = $1 AND branch_id = $2 FOR UPDATE',
+        [vendorId, branchId]
+      );
+      if (vRes.rows.length === 0) {
+        const error = new Error('Vendor not found.');
+        error.status = 404;
+        throw error;
+      }
+      const vendor = vRes.rows[0];
+
+      // 2. Fetch all open accounts for this vendor
+      const accRes = await client.query(
+        `SELECT * FROM accounts 
+         WHERE party_id = $1 
+           AND branch_id = $2 
+           AND type = 'Vendor Payable' 
+           AND status = 'Open'
+           AND remaining > 0.005
+         ORDER BY date ASC, created_at ASC
+         FOR UPDATE`,
+        [vendorId, branchId]
+      );
+
+      if (accRes.rows.length === 0) {
+        const error = new Error('No open payable bills found for this vendor.');
+        error.status = 400;
+        throw error;
+      }
+
+      const totalOpen = accRes.rows.reduce((s, r) => s + parseFloat(r.remaining || 0), 0);
+      if (payAmount > totalOpen + 0.005) {
+        const error = new Error(`Payment amount (PKR ${payAmount.toLocaleString()}) cannot exceed total outstanding payable (PKR ${totalOpen.toLocaleString()}).`);
+        error.status = 400;
+        throw error;
+      }
+
+      // 3. Validate cash/online drawer balance before outflow
+      await validateOutflow(pMethod, payAmount, `Vendor Group Payment (${vendor.name})`, client);
+
+      // 4. Calculate distribution (either from explicit allocations array or FIFO auto-allocation)
+      const plannedAllocations = [];
+      if (Array.isArray(allocations) && allocations.length > 0) {
+        let allocatedSum = 0;
+        for (const alloc of allocations) {
+          const allocAmt = parseFloat(alloc.amount || 0);
+          if (allocAmt <= 0) continue;
+          const targetAcc = accRes.rows.find(a => a.id === alloc.accountId);
+          if (!targetAcc) continue;
+          const remainingAcc = parseFloat(targetAcc.remaining || 0);
+          const effectiveAmt = Math.min(allocAmt, remainingAcc);
+          plannedAllocations.push({
+            account: targetAcc,
+            amount: effectiveAmt
+          });
+          allocatedSum += effectiveAmt;
+        }
+
+        if (allocatedSum <= 0) {
+          const error = new Error('No valid bill allocations provided.');
+          error.status = 400;
+          throw error;
+        }
+      } else {
+        // FIFO Auto-Allocation: Distribute from oldest to newest
+        let remainingToDistribute = payAmount;
+        for (const acc of accRes.rows) {
+          if (remainingToDistribute <= 0.005) break;
+          const accRem = parseFloat(acc.remaining || 0);
+          const takeAmt = Math.min(accRem, remainingToDistribute);
+          plannedAllocations.push({
+            account: acc,
+            amount: takeAmt
+          });
+          remainingToDistribute -= takeAmt;
+        }
+      }
+
+      // 5. Execute settlements and insert payment records
+      const creator = getCreator(req.user);
+      const paymentDate = date ? new Date(date) : new Date();
+      const groupNote = notes && notes.trim() ? notes.trim() : `Group settlement for ${plannedAllocations.length} bill(s)`;
+      const recordedPayments = [];
+      let totalActualSettled = 0;
+
+      for (const item of plannedAllocations) {
+        const { account, amount: itemAmount } = item;
+        const currentRemaining = parseFloat(account.remaining || 0);
+        const newRemaining = Math.max(0, currentRemaining - itemAmount);
+        const newStatus = newRemaining <= 0.005 ? 'Settled' : 'Open';
+
+        // Update Account
+        await client.query(
+          `UPDATE accounts SET remaining = $1, status = $2 WHERE id = $3`,
+          [newRemaining, newStatus, account.id]
+        );
+
+        // Update Linked Invoice
+        if (account.invoice_id) {
+          const invRes = await client.query('SELECT * FROM invoices WHERE id = $1 FOR UPDATE', [account.invoice_id]);
+          if (invRes.rows.length > 0) {
+            const inv = invRes.rows[0];
+            const newPaid = parseFloat(inv.paid || 0) + itemAmount;
+            const newBal = Math.max(0, parseFloat(inv.total || 0) - newPaid - parseFloat(inv.credit_adjusted || 0));
+            const newPayStatus = newBal <= 0.005 ? 'Paid' : 'Partial';
+
+            await client.query(
+              `UPDATE invoices SET paid = $1, balance = $2, payment_status = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4`,
+              [newPaid, newBal, newPayStatus, inv.id]
+            );
+          }
+        }
+
+        // Generate payment ID and log payment entry
+        const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
+        await client.query(
+          `INSERT INTO payments (
+            id, branch_id, account_id, invoice_id, invoice_no, party_type, party_id, party_name,
+            account_type, direction, amount, date, payment_method, reference_id, notes,
+            affects_money, is_initial_settlement, created_by, created_by_name
+          ) VALUES (
+            $1, $2, $3, $4, $5, 'Vendor', $6, $7,
+            'Vendor Payable', 'Paid', $8, $9, $10, $11, $12,
+            TRUE, FALSE, $13, $14
+          )`,
+          [
+            payId, branchId, account.id, account.invoice_id, account.invoice_no, vendor.id, vendor.name,
+            itemAmount, paymentDate, pMethod, referenceId ? referenceId.trim() : null, groupNote,
+            creator.id, creator.name
+          ]
+        );
+
+        recordedPayments.push({
+          paymentId: payId,
+          accountId: account.id,
+          invoiceNo: account.invoice_no,
+          amount: itemAmount,
+          newRemaining,
+          status: newStatus
+        });
+        totalActualSettled += itemAmount;
+      }
+
+      return {
+        vendorId: vendor.id,
+        vendorName: vendor.name,
+        totalPaid: totalActualSettled,
+        settledBillsCount: recordedPayments.length,
+        remainingVendorPayable: Math.max(0, totalOpen - totalActualSettled),
+        payments: recordedPayments
+      };
+    });
+
+    await CacheService.invalidateBranchPattern(branchId, '/api/accounts*');
+    await CacheService.invalidateBranchPattern(branchId, '/api/vendors*');
+    await CacheService.invalidateBranchPattern(branchId, '/api/invoices*');
+    await CacheService.invalidateBranchPattern(branchId, '/api/ledger*');
+    await CacheService.invalidateBranchPattern(branchId, '/api/reports*');
+    await CacheService.invalidateBranchPattern(branchId, '/api/dashboard*');
+
+    emitEvent('accounts.payment_recorded', { vendorId, amount: payAmount });
+    emitEvent('balance.updated', { branchId });
+
+    return res.json({
+      success: true,
+      message: `Successfully recorded group payment of PKR ${result.totalPaid.toLocaleString()} across ${result.settledBillsCount} bill(s) for ${result.vendorName}.`,
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // POST /api/accounts/:id/payment - Record payment installment
 router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
   try {
@@ -311,6 +582,8 @@ router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/customers*');
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/ledger*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
     emitEvent('payment.recorded', result);
 

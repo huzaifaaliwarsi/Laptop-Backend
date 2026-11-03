@@ -223,13 +223,15 @@ router.post('/reset-database', authenticateToken, requireAdmin, async (req, res,
   try {
     const bId = getBranchIdFromReq(req) || 1;
     await db.withTransaction(async (client) => {
-      // Invoices & Payments for this branch
-      await client.query('DELETE FROM invoice_items WHERE invoice_id IN (SELECT id FROM invoices WHERE branch_id = $1)', [bId]);
-      await client.query('DELETE FROM invoices WHERE branch_id = $1', [bId]);
+      // 1. Payments & Accounts first (depend on invoices, customers, vendors)
       await client.query('DELETE FROM payments WHERE branch_id = $1', [bId]);
       await client.query('DELETE FROM accounts WHERE branch_id = $1', [bId]);
       await client.query('DELETE FROM vendor_returns WHERE branch_id = $1', [bId]);
       await client.query('DELETE FROM held_bills WHERE branch_id = $1', [bId]);
+
+      // 2. Invoices & Invoice Items
+      await client.query('DELETE FROM invoice_items WHERE invoice_id IN (SELECT id FROM invoices WHERE branch_id = $1)', [bId]);
+      await client.query('DELETE FROM invoices WHERE branch_id = $1', [bId]);
 
       // Repairs for this branch
       await client.query('DELETE FROM repair_parts_used WHERE repair_job_id IN (SELECT id FROM repair_jobs WHERE branch_id = $1)', [bId]);

@@ -3,6 +3,8 @@ const { getNextTrackingId, getNextEntityId, getNextInvoiceNo } = require('../../
 const { validateOutflow } = require('../../utils/financialFormulas');
 const InventoryService = require('../inventory/inventory.service');
 const { emitEvent } = require('../../config/socket');
+const { getCreator, resolveSafeCreator } = require('../../utils/userHelper');
+const { resolveOrCreateCustomer } = require('../../utils/customerHelper');
 const {
   buildIntakeConfirmationTemplate,
   buildTrackingResponseTemplate,
@@ -33,14 +35,6 @@ function simpleRepairType(job) {
   if (typeof job === 'string') return job === 'Diagnosis Job' ? 'Diagnosis Job' : 'Service Job';
   const isDiag = job.job_type === 'Diagnosis Job' || job.origin_job_type === 'Diagnosis Job' || !!job.approval_status || job.status === 'Repair Approved';
   return isDiag ? 'Diagnosis Job' : 'Service Job';
-}
-
-function getCreator(user) {
-  const isSuper = user?.role === 'super_admin' || user?.isSuperAdmin;
-  return {
-    id: isSuper ? null : (user?.id || null),
-    name: user?.name || (isSuper ? 'Platform Super Admin' : (user?.username || 'Staff'))
-  };
 }
 
 class RepairService {
@@ -432,18 +426,15 @@ class RepairService {
       const cleanContact = contact.trim();
       const branchId = jobData.branchId || user?.branchId || require('../../middleware/branchContext').getBranchStore()?.branchId || 1;
 
-      // Ensure customer
-      let customerId = null;
-      const custRes = await client.query(
-        `SELECT id FROM customers WHERE LOWER(name) = LOWER($1) AND ($2::varchar IS NULL OR contact = $2) AND branch_id = $3`,
-        [cleanName, cleanContact, branchId]
-      );
-      if (custRes.rows.length > 0) {
-        customerId = custRes.rows[0].id;
-      } else {
-        customerId = await getNextEntityId('customers', 'id', 'CUS', 4, client);
-        await client.query(`INSERT INTO customers (id, name, contact, branch_id) VALUES ($1, $2, $3, $4)`, [customerId, cleanName, cleanContact, branchId]);
-      }
+      // Ensure customer (matches by contact phone number, explicit ID, or name)
+      const cust = await resolveOrCreateCustomer({
+        customerId: jobData.customerId || null,
+        customerName: cleanName,
+        contact: cleanContact,
+        branchId,
+        client
+      });
+      const customerId = cust.customerId;
 
       let techName = 'Unassigned';
       if (technicianId) {
@@ -643,7 +634,7 @@ class RepairService {
             [
               job.id, part.id, part.code,
               part.name,
-              qty, charge, parseFloat(part.cost_price || 0), user.id, user.name
+              qty, charge, parseFloat(part.cost_price || 0), validUserId, user?.name || 'Technician'
             ]
           );
 
@@ -658,7 +649,7 @@ class RepairService {
                 `Issued to repair job ${job.id} (${job.customer_name})`,
                 job.id,
                 Math.max(0, parseInt(part.current_stock || 0, 10) - qty),
-                user.id, user.name, job.branch_id || 1
+                validUserId, user?.name || 'Technician', job.branch_id || 1
               ]
             );
           } catch (mErr) {
@@ -699,7 +690,7 @@ class RepairService {
             [
               job.id, product.id, product.code,
               `${product.brand} ${product.model || product.product_name || ''}`.trim(),
-              qty, charge, parseFloat(product.cost_price || 0), user.id, user.name
+              qty, charge, parseFloat(product.cost_price || 0), validUserId, user?.name || 'Technician'
             ]
           );
         }
@@ -1003,6 +994,8 @@ class RepairService {
         throw error;
       }
 
+      const branchId = job.branch_id || user?.branchId || 1;
+      const creator = await resolveSafeCreator(user, branchId, client);
       const pMethod = paymentMethod || 'Cash';
       const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
 
@@ -1019,7 +1012,7 @@ class RepairService {
         [
           payId, job.invoice_id, job.tracking_id, job.customer_id, job.customer_name,
           payAmount, date || new Date(), pMethod, reference || null, note || 'Repair installment payment',
-          user.id, user.name, job.branch_id || 1
+          creator.id, creator.name, branchId
         ]
       );
 
@@ -1038,7 +1031,7 @@ class RepairService {
         [
           repairId, job.status,
           `Payment received: PKR ${payAmount.toLocaleString('en-PK', { maximumFractionDigits: 2 })} via ${pMethod}. Remaining: PKR ${newRemaining.toLocaleString('en-PK', { maximumFractionDigits: 2 })}.`,
-          user.id, user.name
+          creator.id, creator.name
         ]
       );
 
@@ -1082,6 +1075,8 @@ class RepairService {
 
         const pMethod = paymentData?.paymentMethod || 'Cash';
         const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
+        const branchId = job.branch_id || user?.branchId || 1;
+        const creator = await resolveSafeCreator(user, branchId, client);
 
         await client.query(
           `INSERT INTO payments (
@@ -1094,7 +1089,7 @@ class RepairService {
           )`,
           [
             payId, job.invoice_id, job.tracking_id, job.customer_id, job.customer_name,
-            remaining, pMethod, paymentData?.reference || null, user.id, user.name, job.branch_id || 1
+            remaining, pMethod, paymentData?.reference || null, creator.id, creator.name, branchId
           ]
         );
 
@@ -1107,10 +1102,13 @@ class RepairService {
         [repairId]
       );
 
+      const branchId = job.branch_id || user?.branchId || 1;
+      const creator = await resolveSafeCreator(user, branchId, client);
+
       await client.query(
         `INSERT INTO repair_status_history (repair_job_id, status, note, performed_by, performed_by_name)
          VALUES ($1, 'Delivered & Closed', 'Product handed over to customer. Payment balance fully cleared and repair closed.', $2, $3)`,
-        [repairId, user.id, user.name]
+        [repairId, creator.id, creator.name]
       );
 
       await RepairService.syncLinkedInvoice(repairId, client);

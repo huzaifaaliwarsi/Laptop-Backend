@@ -373,6 +373,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/categories*');
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/dashboard*');
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/accounts*');
+    await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/vendors*');
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/invoices*');
     await CacheService.invalidateBranchPattern(getBranchIdFromReq(req), '/api/reports*');
 

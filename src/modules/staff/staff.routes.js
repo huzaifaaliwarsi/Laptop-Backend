@@ -22,8 +22,7 @@ router.get('/', cacheRoute(120), async (req, res, next) => {
     const params = [branchId];
     if (role) {
       params.push(role);
-      queryText += ` AND role = ${params.length}`;
-      params.push(role);
+      queryText += ` AND role = $${params.length}`;
     } else if (req.user.role !== 'admin' && req.user.role !== 'super_admin') {
       // Non-admins can only query active technicians for assignment dropdowns
       queryText += " AND role = 'technician' AND status = 'Active'";
