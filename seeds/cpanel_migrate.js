@@ -315,6 +315,15 @@ async function runSafeMigration() {
     } catch (_) {}
     console.log('✔ repairPartIds and Branch 2 catalogs verified.');
 
+    console.log('Installing FIFO / FEFO batch tracking tables & indexes...');
+    try {
+      const BatchService = require('../src/modules/inventory/batch.service');
+      await BatchService.initBatchTables(pool);
+      console.log('✔ product_batches, indexes and backfill verified.');
+    } catch (batchErr) {
+      console.warn('Note on batch tables (proceeding):', batchErr.message);
+    }
+
     console.log('\n====================================================');
     console.log('  SAFE MIGRATION COMPLETE! ZERO DATA LOSS.');
     console.log('====================================================');

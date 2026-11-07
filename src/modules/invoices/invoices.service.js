@@ -176,7 +176,15 @@ class InvoiceService {
             throw error;
           }
 
-          // Deduct inventory
+          // Allocate stock across batches using FIFO/FEFO
+          const BatchService = require('../inventory/batch.service');
+          const allocations = await BatchService.allocateStock({
+            productId: product.id,
+            branchId,
+            requestedQty: quantity
+          }, client);
+
+          // Deduct inventory aggregate
           await InventoryService.adjustStock({
             productId: product.id,
             direction: 'OUT',
@@ -185,11 +193,9 @@ class InvoiceService {
             refType: 'Sales Invoice',
             refId: invoiceId,
             date: date || new Date(),
-            user
+            user,
+            skipBatchAllocation: true
           }, client);
-
-          const lineTotal = quantity * salePrice;
-          productTotal += lineTotal;
 
           // Real product name resolution based on inventory fields
           let resolvedName = '';
@@ -213,18 +219,32 @@ class InvoiceService {
 
           const resolvedDesc = (product.specifications || product.description || '').trim();
 
-          processedItems.push({
-            itemType: 'product',
-            productId: product.id,
-            category: product.category_name || '',
-            code: product.code,
-            name: resolvedName,
-            description: resolvedDesc,
-            quantity,
-            unitPrice: salePrice,
-            costPriceSnapshot: parseFloat(product.cost_price || 0),
-            lineTotal
-          });
+          // Check if cashier entered an explicit manual negotiated price override
+          const hasManualPriceOverride = item.salePrice !== undefined && item.salePrice !== null && item.salePrice !== '' &&
+            Math.abs(parseFloat(item.salePrice) - parseFloat(product.expected_sale_price)) > 0.001;
+
+          for (let aIdx = 0; aIdx < allocations.length; aIdx++) {
+            const alloc = allocations[aIdx];
+            const batchUnitPrice = hasManualPriceOverride ? parseFloat(item.salePrice) : alloc.unitPrice;
+            const batchLineTotal = alloc.quantity * batchUnitPrice;
+            productTotal += batchLineTotal;
+
+            const batchSuffix = allocations.length > 1 ? ` (Batch ${alloc.batchNo})` : '';
+
+            processedItems.push({
+              itemType: 'product',
+              productId: product.id,
+              batchId: alloc.batchId,
+              category: product.category_name || '',
+              code: product.code,
+              name: `${resolvedName}${batchSuffix}`,
+              description: resolvedDesc,
+              quantity: alloc.quantity,
+              unitPrice: batchUnitPrice,
+              costPriceSnapshot: alloc.costPriceSnapshot,
+              lineTotal: batchLineTotal
+            });
+          }
         }
       }
 
@@ -264,11 +284,11 @@ class InvoiceService {
       for (const pItem of processedItems) {
         await client.query(
           `INSERT INTO invoice_items (
-            invoice_id, branch_id, item_type, product_id, code, name, description, quantity,
+            invoice_id, branch_id, item_type, product_id, batch_id, code, name, description, quantity,
             unit_price, cost_price_snapshot, line_total
-          ) VALUES ($1, $11, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          ) VALUES ($1, $12, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [
-            invoiceId, pItem.itemType || 'product', pItem.productId, pItem.code, pItem.name, pItem.description,
+            invoiceId, pItem.itemType || 'product', pItem.productId, pItem.batchId || null, pItem.code, pItem.name, pItem.description,
             pItem.quantity, pItem.unitPrice, pItem.costPriceSnapshot, pItem.lineTotal, branchId
           ]
         );
@@ -706,7 +726,7 @@ class InvoiceService {
 
       const sVal = parseFloat(exchangeData.shopValue || exchangeData.outSaleValue || shopProduct.expected_sale_price || shopProduct.cost_price || 0);
       const cVal = parseFloat(exchangeData.customerValue || exchangeData.inValue || receivedProduct.costPrice || 0);
-      
+
       let exchangeCase = exchangeData.exchangeCase;
       const diff = sVal - cVal;
       if (!exchangeCase) {
@@ -989,6 +1009,7 @@ class InvoiceService {
       } else {
         // Standard Sales Invoice: restock items
         const itemsRes = await client.query('SELECT * FROM invoice_items WHERE invoice_id = $1', [id]);
+        const BatchService = require('../inventory/batch.service');
         for (const item of itemsRes.rows) {
           if (item.product_id && item.quantity > 0) {
             await InventoryService.adjustStock({
@@ -999,7 +1020,15 @@ class InvoiceService {
               refType: 'Sales Void',
               refId: invoice.id,
               date: date || new Date(),
-              user
+              user,
+              skipBatchAllocation: true
+            }, client);
+
+            await BatchService.returnStockToBatch({
+              batchId: item.batch_id,
+              productId: item.product_id,
+              branchId,
+              quantity: item.quantity
             }, client);
           }
         }

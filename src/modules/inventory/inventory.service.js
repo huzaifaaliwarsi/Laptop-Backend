@@ -45,7 +45,7 @@ class InventoryService {
         p.condition, p.initial_stock, p.stock_in, p.stock_out, p.current_stock, p.low_stock_alert,
         ${userRole === 'technician' ? '0.00 as cost_price' : 'p.cost_price'},
         p.expected_sale_price, p.remarks, p.source_type, p.source_id, p.source_name,
-        p.purchase_invoice_no, p.date_added, p.created_at, p.updated_at
+        p.purchase_invoice_no, p.date_added, p.created_at, p.updated_at, p.expiry_date
       FROM products p
       WHERE 1=1
     `;
@@ -142,6 +142,7 @@ class InventoryService {
       vendorName: row.source_name,
       purchaseInvoiceNo: row.purchase_invoice_no,
       dateAdded: row.date_added,
+      expiryDate: row.expiry_date || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     }));
@@ -276,16 +277,14 @@ class InventoryService {
 
       const updateRes = await client.query(
         `UPDATE products 
-         SET stock_in = $1, current_stock = $2, cost_price = $3, expected_sale_price = $4,
-             low_stock_alert = $5, source_id = COALESCE($6, source_id), source_name = COALESCE($7, source_name),
-             purchase_invoice_no = COALESCE($8, purchase_invoice_no), updated_at = CURRENT_TIMESTAMP
-         WHERE id = $9
+         SET stock_in = $1, current_stock = $2,
+             low_stock_alert = $3, source_id = COALESCE($4, source_id), source_name = COALESCE($5, source_name),
+             purchase_invoice_no = COALESCE($6, purchase_invoice_no), updated_at = CURRENT_TIMESTAMP
+         WHERE id = $7
          RETURNING *`,
         [
           updatedStockIn,
           updatedCurrentStock,
-          costPrice || existing.cost_price,
-          expectedSalePrice || existing.expected_sale_price,
           lowStockAlert,
           sourceData.sourceId || existing.source_id,
           sourceData.sourceName || existing.source_name,
@@ -319,10 +318,28 @@ class InventoryService {
         ]
       );
 
+      // Record purchase batch for FIFO/FEFO tracking
+      const BatchService = require('./batch.service');
+      await BatchService.createBatch({
+        productId: existing.id,
+        branchId: existing.branch_id || branchId,
+        costPrice: costPrice || existing.cost_price,
+        sellingPrice: expectedSalePrice || existing.expected_sale_price,
+        quantity,
+        expiryDate: productData.expiryDate || productData.expiry_date || null,
+        purchaseDate: sourceData.date || new Date(),
+        purchaseInvoiceNo: sourceData.invoiceNo || null,
+        sourceType: sourceData.refType || 'Vendor Purchase',
+        sourceId: sourceData.sourceId || existing.source_id,
+        sourceName: sourceData.sourceName || existing.source_name
+      }, client);
+
       emitEvent('inventory.updated', { productId: existing.id, currentStock: updatedCurrentStock });
 
+      const freshProdRes = await client.query('SELECT * FROM products WHERE id = $1', [existing.id]);
+
       return {
-        product: updateRes.rows[0],
+        product: freshProdRes.rows[0] || updateRes.rows[0],
         isNew: false
       };
     }
@@ -406,6 +423,23 @@ class InventoryService {
       ]
     );
 
+    // Record initial batch for FIFO/FEFO tracking
+    const BatchService = require('./batch.service');
+    await BatchService.createBatch({
+      productId,
+      branchId,
+      batchNo: `BATCH-${code}`,
+      costPrice,
+      sellingPrice: expectedSalePrice,
+      quantity,
+      expiryDate: productData.expiryDate || productData.expiry_date || null,
+      purchaseDate: sourceData.date || new Date(),
+      purchaseInvoiceNo: sourceData.invoiceNo || null,
+      sourceType: sourceData.refType || 'Initial Stock',
+      sourceId: sourceData.sourceId || sourceData.refId || 'MANUAL',
+      sourceName: sourceData.sourceName || null
+    }, client);
+
     emitEvent('inventory.product_created', insertRes.rows[0]);
 
     return {
@@ -427,10 +461,12 @@ class InventoryService {
     vendorName,
     vendorContact,
     costPrice,
+    sellingPrice,
     purchaseInvoiceNo,
     paid,
     paymentMethod = 'Cash',
-    referenceId = null
+    referenceId = null,
+    skipBatchAllocation = false
   }, client = db) {
     const qty = parseInt(quantity, 10);
     if (isNaN(qty) || qty <= 0) {
@@ -474,11 +510,10 @@ class InventoryService {
     const updateRes = await client.query(
       `UPDATE products 
        SET stock_in = $1, stock_out = $2, current_stock = $3,
-           cost_price = CASE WHEN $4::numeric > 0 THEN $4 ELSE cost_price END,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $5
+       WHERE id = $4
        RETURNING *`,
-      [updatedStockIn, updatedStockOut, updatedCurrentStock, effectiveCostPrice, productId]
+      [updatedStockIn, updatedStockOut, updatedCurrentStock, productId]
     );
 
     // Validate user ID exists in DB
@@ -628,10 +663,39 @@ class InventoryService {
       ]
     );
 
+    // 3. Batch synchronization for manual adjustments / internal stock deductions
+    if (!skipBatchAllocation) {
+      const BatchService = require('./batch.service');
+      if (direction === 'OUT') {
+        await BatchService.allocateStock({
+          productId: product.id,
+          branchId: candidateBranchId,
+          requestedQty: qty
+        }, client);
+      } else if (direction === 'IN') {
+        const effectiveSellingPrice = sellingPrice !== undefined && sellingPrice !== ''
+          ? parseFloat(sellingPrice || 0)
+          : parseFloat(product.expected_sale_price || 0);
+
+        await BatchService.createBatch({
+          productId: product.id,
+          branchId: candidateBranchId,
+          costPrice: effectiveCostPrice,
+          sellingPrice: effectiveSellingPrice,
+          quantity: qty,
+          purchaseDate: adjDate,
+          purchaseInvoiceNo: (hasVendor && candidateInvNo) || purchaseInvoiceNo || null,
+          sourceType: finalRefType,
+          sourceId: finalRefId
+        }, client);
+      }
+    }
+
+    const freshProdRes = await client.query('SELECT * FROM products WHERE id = $1', [productId]);
     emitEvent('inventory.updated', { productId, currentStock: updatedCurrentStock });
 
     return {
-      product: updateRes.rows[0],
+      product: freshProdRes.rows[0] || updateRes.rows[0],
       newStock: updatedCurrentStock,
       invoiceNo: finalRefId !== 'MANUAL' ? finalRefId : null
     };

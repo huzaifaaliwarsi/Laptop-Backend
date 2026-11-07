@@ -397,6 +397,13 @@ const ready = (async () => {
     } catch (migErr) {
       console.warn('[DB Init] Shared database runtime migration note (proceeding smoothly):', migErr.message);
     }
+    // Initialize FIFO/FEFO product batch tracking
+    try {
+      const BatchService = require('../modules/inventory/batch.service');
+      await BatchService.initBatchTables(pool);
+    } catch (batchErr) {
+      console.warn('[DB Init] Batch service tables init note:', batchErr.message);
+    }
   } catch (err) {
     console.warn('[DB Init] Startup check note:', err.message);
   }

@@ -87,6 +87,21 @@ router.get('/:id/history', cacheRoute(60), async (req, res, next) => {
   }
 });
 
+// GET /api/products/:id/batches - List batches for a product (FIFO/FEFO order)
+router.get('/:id/batches', async (req, res, next) => {
+  try {
+    const bId = getBranchIdFromReq(req) || 1;
+    const BatchService = require('./batch.service');
+    const batches = await BatchService.getProductBatches(req.params.id, bId);
+    return res.json({
+      success: true,
+      data: batches
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/products/export-csv - Export full inventory as formatted CSV
 router.get('/export-csv', requireSalesOrAdmin, async (req, res, next) => {
   try {
@@ -772,7 +787,7 @@ router.post('/:id/adjust', requireAdmin, async (req, res, next) => {
     const {
       direction, quantity, reason, date,
       vendorId, vendorName, vendorContact,
-      costPrice, purchaseInvoiceNo,
+      costPrice, sellingPrice, expectedSalePrice, purchaseInvoiceNo,
       paid, paymentMethod, referenceId
     } = req.body;
     if (!direction || !quantity) {
@@ -797,6 +812,7 @@ router.post('/:id/adjust', requireAdmin, async (req, res, next) => {
         vendorName,
         vendorContact,
         costPrice,
+        sellingPrice: sellingPrice !== undefined ? sellingPrice : expectedSalePrice,
         purchaseInvoiceNo,
         paid,
         paymentMethod,
