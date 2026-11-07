@@ -161,6 +161,8 @@ async function runSafeMigration() {
       'ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS diagnosis_fee NUMERIC(18, 2) DEFAULT 0.00',
       'ALTER TABLE repair_jobs ADD COLUMN IF NOT EXISTS is_diagnosis_adjusted BOOLEAN DEFAULT FALSE',
       'ALTER TABLE repair_job_lines ADD COLUMN IF NOT EXISTS line_type VARCHAR(50) DEFAULT \'repair\'',
+      'ALTER TABLE repair_job_lines ADD COLUMN IF NOT EXISTS catalog_price_snapshot NUMERIC(18, 2) DEFAULT 0.00',
+      'ALTER TABLE repair_job_lines ADD COLUMN IF NOT EXISTS quantity INT DEFAULT 1',
       'ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS adjust_diagnosis_fee BOOLEAN DEFAULT FALSE',
       'ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS ntn VARCHAR(100)',
       'ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS strn VARCHAR(100)',

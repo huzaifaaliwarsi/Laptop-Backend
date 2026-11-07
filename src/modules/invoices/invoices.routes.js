@@ -133,6 +133,7 @@ router.get('/', cacheRoute(60), async (req, res, next) => {
   }
 });
 
+
 // POST /api/pos/sale - Create POS sale
 router.post('/sale', requireSalesOrAdmin, async (req, res, next) => {
   try {

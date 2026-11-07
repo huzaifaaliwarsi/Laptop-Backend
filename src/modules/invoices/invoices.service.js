@@ -191,13 +191,35 @@ class InvoiceService {
           const lineTotal = quantity * salePrice;
           productTotal += lineTotal;
 
+          // Real product name resolution based on inventory fields
+          let resolvedName = '';
+          const b = (product.brand || '').trim();
+          const m = (product.model || '').trim();
+          const pn = (product.product_name || '').trim();
+
+          if (pn && pn !== b && pn !== m) {
+            resolvedName = pn;
+          } else if (b && m) {
+            if (b.toLowerCase() === m.toLowerCase()) {
+              resolvedName = b;
+            } else if (m.toLowerCase().startsWith(b.toLowerCase())) {
+              resolvedName = m;
+            } else {
+              resolvedName = `${b} ${m}`;
+            }
+          } else {
+            resolvedName = pn || m || b || product.category_name || 'Product';
+          }
+
+          const resolvedDesc = (product.specifications || product.description || '').trim();
+
           processedItems.push({
             itemType: 'product',
             productId: product.id,
-            category: product.category_name || 'Product',
+            category: product.category_name || '',
             code: product.code,
-            name: `${product.brand} ${product.model || product.product_name || ''}`.trim(),
-            description: `${product.category_name} — ${product.brand} ${product.model} | ${product.specifications || ''}`,
+            name: resolvedName,
+            description: resolvedDesc,
             quantity,
             unitPrice: salePrice,
             costPriceSnapshot: parseFloat(product.cost_price || 0),
@@ -1503,6 +1525,27 @@ class InvoiceService {
         const discount = parseFloat(item.discount || 0);
         const grossAmount = qty * rate;
         const lineTotal = parseFloat(item.line_total || (grossAmount - discount));
+        let displayName = item.name || 'Product';
+        if (displayName) {
+          const parts = displayName.trim().split(/\s+/);
+          if (parts.length === 2 && parts[0].toLowerCase() === parts[1].toLowerCase()) {
+            displayName = parts[0];
+          }
+        }
+
+        let displayDesc = (item.description || '').trim();
+        if (displayDesc && displayDesc.includes('—')) {
+          const afterDash = displayDesc.split('—').slice(1).join('—').trim();
+          if (afterDash.includes('|')) {
+            displayDesc = afterDash.split('|').slice(1).join('|').trim();
+          } else {
+            displayDesc = afterDash;
+          }
+        }
+        if (displayDesc.toLowerCase().startsWith('brand:') && displayDesc.replace(/^brand:\s*/i, '').trim().toLowerCase() === displayName.toLowerCase()) {
+          displayDesc = '';
+        }
+
         return {
           id: item.id,
           itemType: item.item_type,
@@ -1510,9 +1553,9 @@ class InvoiceService {
           serviceId: item.service_id,
           productCode: item.code,
           hsCode: item.hs_code || item.code || '—',
-          name: item.name,
-          category: item.category || (item.item_type === 'service' ? 'Service' : (item.description && item.description.includes('—') ? item.description.split('—')[0].trim() : (item.item_type === 'custom_product' ? 'Custom Item' : 'Product'))),
-          description: item.description,
+          name: displayName,
+          category: item.category || (item.item_type === 'service' ? 'Service' : (item.item_type === 'custom_product' ? 'Custom' : '')),
+          description: displayDesc,
           quantity: qty,
           rate: rate,
           amount: grossAmount,
