@@ -45,8 +45,26 @@ class InventoryService {
         p.condition, p.initial_stock, p.stock_in, p.stock_out, p.current_stock, p.low_stock_alert,
         ${userRole === 'technician' ? '0.00 as cost_price' : 'p.cost_price'},
         p.expected_sale_price, p.remarks, p.source_type, p.source_id, p.source_name,
-        p.purchase_invoice_no, p.date_added, p.created_at, p.updated_at, p.expiry_date
+        p.purchase_invoice_no, p.date_added, p.created_at, p.updated_at, p.expiry_date,
+        ${userRole === 'technician' ? '0.00 as stock_cost_value' : 'COALESCE(pb.batch_cost_val, p.current_stock * p.cost_price) as stock_cost_value'},
+        COALESCE(pb.batch_sale_val, p.current_stock * p.expected_sale_price) as stock_sale_value,
+        COALESCE(pb.active_batch_count, CASE WHEN p.current_stock > 0 THEN 1 ELSE 0 END) as active_batch_count,
+        COALESCE(pb.fifo_avg_cost, p.cost_price) as fifo_avg_cost,
+        COALESCE(pb.fifo_avg_sale, p.expected_sale_price) as fifo_avg_sale
       FROM products p
+      LEFT JOIN (
+        SELECT 
+          pb.product_id,
+          pb.branch_id,
+          COALESCE(SUM(pb.quantity * pb.cost_price), 0) AS batch_cost_val,
+          COALESCE(SUM(pb.quantity * pb.selling_price), 0) AS batch_sale_val,
+          COUNT(CASE WHEN pb.quantity > 0 THEN 1 END) AS active_batch_count,
+          CASE WHEN SUM(pb.quantity) > 0 THEN ROUND(SUM(pb.quantity * pb.cost_price) / SUM(pb.quantity), 2) ELSE 0 END AS fifo_avg_cost,
+          CASE WHEN SUM(pb.quantity) > 0 THEN ROUND(SUM(pb.quantity * pb.selling_price) / SUM(pb.quantity), 2) ELSE 0 END AS fifo_avg_sale
+        FROM product_batches pb
+        WHERE pb.quantity > 0 AND (pb.expiry_date IS NULL OR pb.expiry_date >= CURRENT_DATE)
+        GROUP BY pb.product_id, pb.branch_id
+      ) pb ON pb.product_id = p.id AND pb.branch_id = p.branch_id
       WHERE 1=1
     `;
     const branchContext = require('../../middleware/branchContext');
@@ -134,6 +152,11 @@ class InventoryService {
       lowStockAlert: parseInt(row.low_stock_alert || 1, 10),
       costPrice: parseFloat(row.cost_price || 0),
       expectedSalePrice: parseFloat(row.expected_sale_price || 0),
+      stockCostValue: parseFloat(row.stock_cost_value || 0),
+      stockSaleValue: parseFloat(row.stock_sale_value || 0),
+      activeBatchesCount: parseInt(row.active_batch_count || (row.current_stock > 0 ? 1 : 0), 10),
+      fifoAvgCost: parseFloat(row.fifo_avg_cost || row.cost_price || 0),
+      fifoAvgSale: parseFloat(row.fifo_avg_sale || row.expected_sale_price || 0),
       remarks: row.remarks,
       sourceType: row.source_type,
       sourceId: row.source_id,
@@ -533,6 +556,8 @@ class InventoryService {
     let vId = vendorId;
     let vName = vendorName;
     const hasVendor = (vId && vId !== 'MANUAL') || (vName && vName.trim() !== '' && vName !== 'Manual Entry');
+    let candidateInvNo = (purchaseInvoiceNo && purchaseInvoiceNo !== 'MANUAL') ? purchaseInvoiceNo : null;
+    let targetInvoiceNo = candidateInvNo;
 
     if (direction === 'IN' && hasVendor) {
       // Resolve vendor ID / Name
@@ -565,17 +590,17 @@ class InventoryService {
         const balance = Math.max(0, totalCost - paidAmount);
         const pStatus = paymentStatus(totalCost, paidAmount);
 
-        let candidateInvNo = purchaseInvoiceNo && purchaseInvoiceNo !== 'MANUAL'
-          ? purchaseInvoiceNo
-          : await getNextInvoiceNo('vendor_purchase', client, candidateBranchId);
+        if (!candidateInvNo) {
+          candidateInvNo = await getNextInvoiceNo('vendor_purchase', client, candidateBranchId);
+        }
 
         const invExistsCheck = await client.query('SELECT 1 FROM invoices WHERE invoice_no = $1 AND branch_id = $2', [candidateInvNo, candidateBranchId]);
         if (invExistsCheck.rows.length > 0) {
           candidateInvNo = await getNextInvoiceNo('vendor_purchase', client, candidateBranchId);
         }
 
+        targetInvoiceNo = candidateInvNo;
         const targetInvoiceId = await getNextEntityId('invoices', 'id', 'INV', 5, client);
-        const targetInvoiceNo = candidateInvNo;
 
         const invRes = await client.query(
           `INSERT INTO invoices (
@@ -684,9 +709,10 @@ class InventoryService {
           sellingPrice: effectiveSellingPrice,
           quantity: qty,
           purchaseDate: adjDate,
-          purchaseInvoiceNo: (hasVendor && candidateInvNo) || purchaseInvoiceNo || null,
+          purchaseInvoiceNo: (hasVendor && targetInvoiceNo) || (purchaseInvoiceNo && purchaseInvoiceNo !== 'MANUAL' ? purchaseInvoiceNo : null),
           sourceType: finalRefType,
-          sourceId: finalRefId
+          sourceId: finalRefId,
+          sourceName: (hasVendor ? vName : null) || null
         }, client);
       }
     }

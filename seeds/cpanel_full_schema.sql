@@ -691,7 +691,7 @@ INSERT INTO repair_services (id, code, name, charges, duration, conditions, stat
 ('SRV-0004', 'SRV-0004', 'RAM / SSD Upgrade & Cloning', 1000.00, '2 hours', 'Excluding hardware part price', 'Active'),
 ('SRV-0005', 'SRV-0005', 'Hinges Repair & Casing Fabrication', 2000.00, '2 days', 'Structural warranty 30 days', 'Active'),
 ('SRV-0006', 'SRV-0006', 'Fan Cleaning & Thermal Paste Service', 1500.00, '3 hours', 'Using Arctic MX-4 compound', 'Active')
-ON CONFLICT (code) DO UPDATE SET charges = EXCLUDED.charges;
+ON CONFLICT (id) DO UPDATE SET charges = EXCLUDED.charges;
 
 -- Default Users (Password: admin -> admin, sales -> sales123, tech -> tech123)
 INSERT INTO users (id, name, contact, designation, role, username, password_hash, status) VALUES

@@ -25,11 +25,11 @@ const EPSILON = 0.005;
 function applyDateFilter(queryText, params, from, to, dateCol = 'date') {
   if (from) {
     params.push(from);
-    queryText += ` AND ${dateCol} >= $${params.length}`;
+    queryText += ` AND ${dateCol}::date >= $${params.length}::date`;
   }
   if (to) {
     params.push(to);
-    queryText += ` AND ${dateCol} <= $${params.length}`;
+    queryText += ` AND ${dateCol}::date <= $${params.length}::date`;
   }
   return queryText;
 }
@@ -161,17 +161,28 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
       recentInvoicesRes,
       recentRepairsRes,
       recentExpensesRes,
-      lowStockRes
+      lowStockRes,
+      todayPayRes
     ] = await Promise.all([
       db.query(`
         SELECT 
           COUNT(*) as total_products,
-          COALESCE(SUM(current_stock), 0) as current_stock,
-          COUNT(CASE WHEN current_stock <= low_stock_alert THEN 1 END) as low_stock,
-          COALESCE(SUM(current_stock * cost_price), 0) as stock_cost_value,
-          COALESCE(SUM(current_stock * expected_sale_price), 0) as stock_sale_value
-        FROM products
-        WHERE branch_id = $1
+          COALESCE(SUM(p.current_stock), 0) as current_stock,
+          COUNT(CASE WHEN p.current_stock <= p.low_stock_alert THEN 1 END) as low_stock,
+          COALESCE(SUM(COALESCE(pb.batch_cost_val, p.current_stock * p.cost_price)), 0) as stock_cost_value,
+          COALESCE(SUM(COALESCE(pb.batch_sale_val, p.current_stock * p.expected_sale_price)), 0) as stock_sale_value
+        FROM products p
+        LEFT JOIN (
+          SELECT 
+            pb.product_id,
+            pb.branch_id,
+            COALESCE(SUM(pb.quantity * pb.cost_price), 0) AS batch_cost_val,
+            COALESCE(SUM(pb.quantity * pb.selling_price), 0) AS batch_sale_val
+          FROM product_batches pb
+          WHERE pb.quantity > 0 AND (pb.expiry_date IS NULL OR pb.expiry_date >= CURRENT_DATE)
+          GROUP BY pb.product_id, pb.branch_id
+        ) pb ON pb.product_id = p.id AND pb.branch_id = p.branch_id
+        WHERE p.branch_id = $1
       `, [bId]),
       // Net Sales = non-voided Sales Invoice totals (formula: gross - credit_adjusted)
       db.query(`
@@ -228,8 +239,21 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
       db.query(`
         SELECT code, brand, model, category_name as category, current_stock, low_stock_alert, cost_price, expected_sale_price as sale_price
         FROM products WHERE branch_id = $1 AND current_stock <= low_stock_alert ORDER BY current_stock ASC LIMIT 6
+      `, [bId]),
+      db.query(`
+        SELECT 
+          COALESCE(SUM(CASE WHEN direction = 'Received' THEN amount ELSE 0 END), 0) as today_collections,
+          COALESCE(SUM(CASE WHEN direction = 'Received' AND is_initial_settlement = FALSE AND (party_type = 'Customer' OR account_type = 'Customer Receivable') THEN amount ELSE 0 END), 0) as today_udhar_recovered,
+          COALESCE(SUM(CASE WHEN direction = 'Paid' AND (party_type = 'Vendor' OR account_type = 'Vendor Payable') THEN amount ELSE 0 END), 0) as today_supplier_paid
+        FROM payments
+        WHERE branch_id = $1 AND date = CURRENT_DATE AND affects_money = TRUE
       `, [bId])
     ]);
+
+    const todayPayRow = todayPayRes?.rows[0] || {};
+    const todayCollections = r2(todayPayRow.today_collections || 0);
+    const todayUdharRecovered = r2(todayPayRow.today_udhar_recovered || 0);
+    const todaySupplierPaid = r2(todayPayRow.today_supplier_paid || 0);
 
     return res.json({
       success: true,
@@ -243,8 +267,11 @@ router.get('/dashboard', cacheRoute(30), async (req, res, next) => {
           stockSaleValue: r2(prodRes.rows[0].stock_sale_value),
           totalSales: r2(salesRes.rows[0].total_sales),
           todaySales: r2(salesRes.rows[0].today_sales),
-          totalSalesCount: parseInt(salesRes.rows[0].total_sales_count || 0, 10),
           todaySalesCount: parseInt(salesRes.rows[0].today_sales_count || 0, 10),
+          todayCollections,
+          todayUdharRecovered,
+          todaySupplierPaid,
+          totalSalesCount: parseInt(salesRes.rows[0].total_sales_count || 0, 10),
           customerReceivables: r2(accountsRes.rows[0].customer_receivable),
           customerPayables: r2(accountsRes.rows[0].customer_payable),
           vendorPayables: r2(accountsRes.rows[0].vendor_payable),
@@ -288,7 +315,7 @@ router.get('/sales', cacheRoute(30), async (req, res, next) => {
       SELECT 
         i.id, i.invoice_no, i.type, i.date, i.party_name,
         i.product_total, i.service_total, i.total,
-        i.paid, i.credit_adjusted, i.balance,
+        i.paid, i.initial_paid, i.credit_adjusted, i.balance,
         i.payment_method, i.reference_id, i.payment_status,
         i.is_voided, i.exchange_case,
         i.created_by_name,
@@ -325,20 +352,82 @@ router.get('/sales', cacheRoute(30), async (req, res, next) => {
     queryText = applyDateFilter(queryText, params, from, to, 'i.date');
     queryText += ' ORDER BY i.date DESC, i.created_at DESC';
 
-    const result = await db.query(queryText, params);
+    // Symmetrical query for customer collections & udhar recoveries in period
+    let recQuery = `
+      SELECT 
+        p.id, p.date, p.amount, p.payment_method, p.reference_id, p.notes,
+        p.invoice_no, p.invoice_id, p.party_id, p.party_name, p.is_initial_settlement,
+        p.created_by_name, p.account_type,
+        i.date as invoice_date, i.total as invoice_total
+      FROM payments p
+      LEFT JOIN invoices i ON i.id = p.invoice_id
+      WHERE p.branch_id = $1
+        AND p.direction = 'Received'
+        AND p.affects_money = TRUE
+        AND (p.party_type = 'Customer' OR p.account_type = 'Customer Receivable')
+    `;
+    const recParams = [bId];
+    if (req.user.role === 'sales') {
+      recParams.push(req.user.id);
+      recQuery += ` AND p.created_by = $${recParams.length}`;
+    } else if (staffId) {
+      recParams.push(staffId);
+      recQuery += ` AND p.created_by = $${recParams.length}`;
+    }
+    if (paymentMethod) {
+      recParams.push(paymentMethod);
+      recQuery += ` AND p.payment_method = $${recParams.length}`;
+    }
+    recQuery = applyDateFilter(recQuery, recParams, from, to, 'p.date');
+    recQuery += ' ORDER BY p.date DESC, p.created_at DESC';
+
+    const [result, recResult] = await Promise.all([
+      db.query(queryText, params),
+      db.query(recQuery, recParams)
+    ]);
+
+    let initialCollections = 0;
+    let udharRecoveries = 0;
+    const recoveryList = [];
+
+    recResult.rows.forEach(p => {
+      const amt = r2(p.amount);
+      const isInitial = Boolean(p.is_initial_settlement);
+      if (isInitial) {
+        initialCollections += amt;
+      } else {
+        udharRecoveries += amt;
+      }
+      recoveryList.push({
+        id: p.id,
+        date: p.date,
+        customerName: p.party_name,
+        invoiceNo: p.invoice_no || '—',
+        invoiceDate: p.invoice_date,
+        invoiceTotal: r2(p.invoice_total),
+        amount: amt,
+        isInitial,
+        type: isInitial ? 'Initial POS Collection' : 'Client Udhar Recovery',
+        paymentMethod: p.payment_method,
+        referenceId: p.reference_id || '—',
+        notes: p.notes || '—',
+        receivedBy: p.created_by_name || 'Staff'
+      });
+    });
+    const totalCollections = r2(initialCollections + udharRecoveries);
 
     // Summary totals
-    let grossSales = 0, totalCogs = 0, totalPaid = 0, totalBalance = 0;
+    let grossSales = 0, totalCogs = 0, totalBalance = 0;
     const rows = result.rows.map(row => {
       const total = r2(row.total);
       const paid = r2(row.paid);
+      const initialPaid = r2(row.initial_paid || 0);
       const isPrivileged = req.user.role === 'admin' || req.user.role === 'super_admin' || req.user.isSuperAdmin;
       const cogs = isPrivileged ? r2(row.cogs) : 0;
       const remaining = Math.max(0, r2(total - paid));
       const settled = remaining <= EPSILON;
       grossSales += total;
       totalCogs += cogs;
-      totalPaid += paid;
       totalBalance += remaining;
       return {
         id: row.id,
@@ -351,6 +440,7 @@ router.get('/sales', cacheRoute(30), async (req, res, next) => {
         total,
         cogs,
         paid,
+        initialPaid,
         creditAdjusted: r2(row.credit_adjusted),
         remaining: settled ? 0 : remaining,
         paymentMethod: row.payment_method,
@@ -366,11 +456,17 @@ router.get('/sales', cacheRoute(30), async (req, res, next) => {
         grossSales: r2(grossSales),
         totalCogs: r2(totalCogs),
         grossProfit: r2(grossSales - totalCogs),
-        totalPaid: r2(totalPaid),
+        initialCollections: r2(initialCollections),
+        udharRecoveries: r2(udharRecoveries),
+        totalCollections: r2(totalCollections),
+        totalPaid: r2(totalCollections),
         totalOutstanding: r2(totalBalance),
-        count: rows.length
+        newCreditGiven: r2(Math.max(0, grossSales - initialCollections)),
+        count: rows.length,
+        recoveriesCount: recoveryList.length
       },
-      data: rows
+      data: rows,
+      recoveries: recoveryList
     });
   } catch (error) {
     next(error);
@@ -490,7 +586,7 @@ router.get('/purchases', requireAdmin, cacheRoute(60), async (req, res, next) =>
     let queryText = `
       SELECT 
         i.id, i.invoice_no, i.type, i.date, i.party_name, i.party_type,
-        i.total, i.paid, i.credit_adjusted, i.balance,
+        i.total, i.paid, i.initial_paid, i.credit_adjusted, i.balance,
         i.payment_method, i.payment_status, i.is_voided,
         i.created_by_name
       FROM invoices i
@@ -517,17 +613,77 @@ router.get('/purchases', requireAdmin, cacheRoute(60), async (req, res, next) =>
     queryText = applyDateFilter(queryText, params, from, to, 'i.date');
     queryText += ' ORDER BY i.date DESC, i.created_at DESC';
 
-    const result = await db.query(queryText, params);
+    // Symmetrical query for supplier payments in period
+    let payQuery = `
+      SELECT 
+        p.id, p.date, p.amount, p.payment_method, p.reference_id, p.notes,
+        p.invoice_no, p.invoice_id, p.party_id, p.party_name, p.is_initial_settlement,
+        p.created_by_name, p.account_type,
+        i.date as purchase_date, i.total as purchase_total
+      FROM payments p
+      LEFT JOIN invoices i ON i.id = p.invoice_id
+      WHERE p.branch_id = $1
+        AND p.direction = 'Paid'
+        AND p.affects_money = TRUE
+        AND (p.party_type = 'Vendor' OR p.account_type = 'Vendor Payable')
+    `;
+    const payParams = [bId];
+    if (staffId) {
+      payParams.push(staffId);
+      payQuery += ` AND p.created_by = $${payParams.length}`;
+    }
+    if (paymentMethod) {
+      payParams.push(paymentMethod);
+      payQuery += ` AND p.payment_method = $${payParams.length}`;
+    }
+    payQuery = applyDateFilter(payQuery, payParams, from, to, 'p.date');
+    payQuery += ' ORDER BY p.date DESC, p.created_at DESC';
 
-    let totalPurchases = 0, totalPaid = 0, totalOutstanding = 0;
+    const [result, payResult] = await Promise.all([
+      db.query(queryText, params),
+      db.query(payQuery, payParams)
+    ]);
+
+    let initialSupplierPayments = 0;
+    let supplierUdharPayments = 0;
+    const supplierPaymentList = [];
+
+    payResult.rows.forEach(p => {
+      const amt = r2(p.amount);
+      const isInitial = Boolean(p.is_initial_settlement);
+      if (isInitial) {
+        initialSupplierPayments += amt;
+      } else {
+        supplierUdharPayments += amt;
+      }
+      supplierPaymentList.push({
+        id: p.id,
+        date: p.date,
+        partyName: p.party_name,
+        vendorName: p.party_name,
+        invoiceNo: p.invoice_no || '—',
+        purchaseDate: p.purchase_date,
+        purchaseTotal: r2(p.purchase_total),
+        amount: amt,
+        isInitial,
+        type: isInitial ? 'Initial Purchase Payment' : 'Supplier Udhar Payment',
+        paymentMethod: p.payment_method,
+        referenceId: p.reference_id || '—',
+        notes: p.notes || '—',
+        paidBy: p.created_by_name || 'Admin'
+      });
+    });
+    const totalSupplierPayments = r2(initialSupplierPayments + supplierUdharPayments);
+
+    let totalPurchases = 0, totalOutstanding = 0;
     const rows = result.rows.map(row => {
       const total = r2(row.total);
       const paid = r2(row.paid);
+      const initialPaid = r2(row.initial_paid || 0);
       const creditAdj = r2(row.credit_adjusted);
       const remaining = Math.max(0, r2(total - paid - creditAdj));
       const settled = remaining <= EPSILON;
       totalPurchases += total;
-      totalPaid += paid;
       totalOutstanding += remaining;
       return {
         id: row.id,
@@ -538,6 +694,7 @@ router.get('/purchases', requireAdmin, cacheRoute(60), async (req, res, next) =>
         partyType: row.party_type,
         total,
         paid,
+        initialPaid,
         creditAdjusted: creditAdj,
         remaining: settled ? 0 : remaining,
         paymentMethod: row.payment_method,
@@ -551,11 +708,16 @@ router.get('/purchases', requireAdmin, cacheRoute(60), async (req, res, next) =>
       success: true,
       summary: {
         totalPurchases: r2(totalPurchases),
-        totalPaid: r2(totalPaid),
+        initialSupplierPayments: r2(initialSupplierPayments),
+        supplierUdharPayments: r2(supplierUdharPayments),
+        totalPaid: r2(totalSupplierPayments), // Actual money paid out in this period
+        newCreditTaken: r2(Math.max(0, totalPurchases - initialSupplierPayments)),
         totalOutstanding: r2(totalOutstanding),
-        count: rows.length
+        count: rows.length,
+        supplierPaymentsCount: supplierPaymentList.length
       },
-      data: rows
+      data: rows,
+      supplierPayments: supplierPaymentList
     });
   } catch (error) {
     next(error);
@@ -671,10 +833,26 @@ router.get('/inventory', requireAdmin, cacheRoute(120), async (req, res, next) =
         p.initial_stock, p.stock_in, p.stock_out, p.current_stock,
         p.cost_price, p.expected_sale_price,
         p.low_stock_alert, p.date_added,
-        (p.current_stock * p.cost_price) as cost_value,
-        (p.current_stock * p.expected_sale_price) as sale_value,
-        ((p.current_stock * p.expected_sale_price) - (p.current_stock * p.cost_price)) as unrealised_margin
+        COALESCE(pb.batch_cost_val, p.current_stock * p.cost_price) as cost_value,
+        COALESCE(pb.batch_sale_val, p.current_stock * p.expected_sale_price) as sale_value,
+        (COALESCE(pb.batch_sale_val, p.current_stock * p.expected_sale_price) - COALESCE(pb.batch_cost_val, p.current_stock * p.cost_price)) as unrealised_margin,
+        COALESCE(pb.active_batch_count, CASE WHEN p.current_stock > 0 THEN 1 ELSE 0 END) as active_batches,
+        COALESCE(pb.fifo_avg_cost, p.cost_price) as fifo_avg_cost,
+        COALESCE(pb.fifo_avg_sale, p.expected_sale_price) as fifo_avg_sale
       FROM products p
+      LEFT JOIN (
+        SELECT 
+          pb.product_id,
+          pb.branch_id,
+          COALESCE(SUM(pb.quantity * pb.cost_price), 0) AS batch_cost_val,
+          COALESCE(SUM(pb.quantity * pb.selling_price), 0) AS batch_sale_val,
+          COUNT(CASE WHEN pb.quantity > 0 THEN 1 END) AS active_batch_count,
+          CASE WHEN SUM(pb.quantity) > 0 THEN ROUND(SUM(pb.quantity * pb.cost_price) / SUM(pb.quantity), 2) ELSE 0 END AS fifo_avg_cost,
+          CASE WHEN SUM(pb.quantity) > 0 THEN ROUND(SUM(pb.quantity * pb.selling_price) / SUM(pb.quantity), 2) ELSE 0 END AS fifo_avg_sale
+        FROM product_batches pb
+        WHERE pb.quantity > 0 AND (pb.expiry_date IS NULL OR pb.expiry_date >= CURRENT_DATE)
+        GROUP BY pb.product_id, pb.branch_id
+      ) pb ON pb.product_id = p.id AND pb.branch_id = p.branch_id
       WHERE p.branch_id = $1
     `;
     const params = [bId];
@@ -707,11 +885,12 @@ router.get('/inventory', requireAdmin, cacheRoute(120), async (req, res, next) =
         stockIn: parseInt(row.stock_in || 0, 10),
         stockOut: parseInt(row.stock_out || 0, 10),
         currentStock: parseInt(row.current_stock || 0, 10),
-        costPrice: r2(row.cost_price),
-        salePriceEP: r2(row.expected_sale_price),
+        costPrice: r2(row.fifo_avg_cost || row.cost_price),
+        salePriceEP: r2(row.fifo_avg_sale || row.expected_sale_price),
         costValue,
         saleValue,
         unrealisedMargin: r2(row.unrealised_margin),
+        activeBatches: parseInt(row.active_batches || 1, 10),
         lowStockAlert: row.low_stock_alert,
         isLowStock: parseInt(row.current_stock || 0, 10) <= parseInt(row.low_stock_alert || 0, 10),
         dateAdded: row.date_added
@@ -1013,15 +1192,63 @@ router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next)
 
     const branchId = getBranchIdFromReq(req) || 1;
     const settingsRes = await db.query(`SELECT opening_cash, opening_online FROM business_settings WHERE branch_id = $1`, [branchId]);
-    const openingCash = r2(settingsRes.rows[0]?.opening_cash || 0);
-    const openingOnline = r2(settingsRes.rows[0]?.opening_online || 0);
+    const baseOpeningCash = r2(settingsRes.rows[0]?.opening_cash || 0);
+    const baseOpeningOnline = r2(settingsRes.rows[0]?.opening_online || 0);
+
+    let openingCash = baseOpeningCash;
+    let openingOnline = baseOpeningOnline;
+
+    // Calculate accurate period opening balance if from-date is provided
+    if (from) {
+      const [priorCashFlows, priorExpenses] = await Promise.all([
+        db.query(`
+          SELECT 
+            payment_method,
+            COALESCE(SUM(CASE WHEN direction = 'Received' THEN amount ELSE 0 END), 0) as prior_received,
+            COALESCE(SUM(CASE WHEN direction = 'Paid' THEN amount ELSE 0 END), 0) as prior_paid
+          FROM payments
+          WHERE branch_id = $1
+            AND affects_money = TRUE
+            AND payment_method IN ('Cash', 'Online')
+            AND date < $2
+          GROUP BY payment_method
+        `, [branchId, from]),
+        db.query(`
+          SELECT 
+            payment_method,
+            COALESCE(SUM(amount), 0) as prior_expenses
+          FROM expenses
+          WHERE branch_id = $1 AND date < $2
+          GROUP BY payment_method
+        `, [branchId, from])
+      ]);
+
+      const priorMap = { Cash: { received: 0, paid: 0, expenses: 0 }, Online: { received: 0, paid: 0, expenses: 0 } };
+      priorCashFlows.rows.forEach(r => {
+        if (priorMap[r.payment_method]) {
+          priorMap[r.payment_method].received = parseFloat(r.prior_received || 0);
+          priorMap[r.payment_method].paid = parseFloat(r.prior_paid || 0);
+        }
+      });
+      priorExpenses.rows.forEach(r => {
+        if (priorMap[r.payment_method]) {
+          priorMap[r.payment_method].expenses = parseFloat(r.prior_expenses || 0);
+        }
+      });
+
+      openingCash = r2(baseOpeningCash + priorMap.Cash.received - priorMap.Cash.paid - priorMap.Cash.expenses);
+      openingOnline = r2(baseOpeningOnline + priorMap.Online.received - priorMap.Online.paid - priorMap.Online.expenses);
+    }
 
     // Cash flows (date-filtered)
     let cashQuery = `
       SELECT 
         payment_method,
-        SUM(CASE WHEN direction = 'Received' THEN amount ELSE 0 END) as received,
-        SUM(CASE WHEN direction = 'Paid' THEN amount ELSE 0 END) as paid_out
+        direction,
+        is_initial_settlement,
+        party_type,
+        account_type,
+        SUM(amount) as subtotal
       FROM payments
       WHERE branch_id = $1
         AND affects_money = TRUE
@@ -1029,7 +1256,7 @@ router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next)
     `;
     const cashParams = [branchId];
     cashQuery = applyDateFilter(cashQuery, cashParams, from, to, 'date');
-    cashQuery += ' GROUP BY payment_method';
+    cashQuery += ' GROUP BY payment_method, direction, is_initial_settlement, party_type, account_type';
 
     let expQuery = `
       SELECT 
@@ -1056,19 +1283,41 @@ router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next)
     dailyQuery = applyDateFilter(dailyQuery, dailyParams, from, to, 'date');
     dailyQuery += ' GROUP BY date, payment_method ORDER BY date ASC';
 
-    const [cashRes, expRes, dailyRes] = await Promise.all([
+    const [cashRes, expRes, dailyRes, liveCash, liveOnline] = await Promise.all([
       db.query(cashQuery, cashParams),
       db.query(expQuery, expParams),
-      db.query(dailyQuery, dailyParams)
+      db.query(dailyQuery, dailyParams),
+      getAvailableBalance('Cash', db, branchId),
+      getAvailableBalance('Online', db, branchId)
     ]);
 
-    const flows = { Cash: { received: 0, paidOut: 0, expenses: 0 }, Online: { received: 0, paidOut: 0, expenses: 0 } };
+    const flows = {
+      Cash: { received: 0, paidOut: 0, expenses: 0, clientRecoveries: 0, salesInitial: 0, supplierUdharPaid: 0, purchasesInitial: 0 },
+      Online: { received: 0, paidOut: 0, expenses: 0, clientRecoveries: 0, salesInitial: 0, supplierUdharPaid: 0, purchasesInitial: 0 }
+    };
+
     cashRes.rows.forEach(row => {
-      if (flows[row.payment_method]) {
-        flows[row.payment_method].received = r2(row.received);
-        flows[row.payment_method].paidOut = r2(row.paid_out);
+      const pm = row.payment_method;
+      const amt = r2(row.subtotal);
+      if (!flows[pm]) return;
+
+      if (row.direction === 'Received') {
+        flows[pm].received = r2(flows[pm].received + amt);
+        if (!row.is_initial_settlement && (row.party_type === 'Customer' || row.account_type === 'Customer Receivable')) {
+          flows[pm].clientRecoveries = r2(flows[pm].clientRecoveries + amt);
+        } else {
+          flows[pm].salesInitial = r2(flows[pm].salesInitial + amt);
+        }
+      } else if (row.direction === 'Paid') {
+        flows[pm].paidOut = r2(flows[pm].paidOut + amt);
+        if (!row.is_initial_settlement && (row.party_type === 'Vendor' || row.account_type === 'Vendor Payable')) {
+          flows[pm].supplierUdharPaid = r2(flows[pm].supplierUdharPaid + amt);
+        } else {
+          flows[pm].purchasesInitial = r2(flows[pm].purchasesInitial + amt);
+        }
       }
     });
+
     expRes.rows.forEach(row => {
       if (flows[row.payment_method]) {
         flows[row.payment_method].expenses = r2(row.total_expenses);
@@ -1084,18 +1333,29 @@ router.get('/cash-balance', requireAdmin, cacheRoute(60), async (req, res, next)
         cash: {
           opening: openingCash,
           received: flows.Cash.received,
+          salesInitial: flows.Cash.salesInitial,
+          clientRecoveries: flows.Cash.clientRecoveries,
           paidOut: flows.Cash.paidOut,
+          purchasesInitial: flows.Cash.purchasesInitial,
+          supplierUdharPaid: flows.Cash.supplierUdharPaid,
           expenses: flows.Cash.expenses,
-          balance: cashBalance
+          balance: cashBalance,
+          liveAvailable: r2(liveCash)
         },
         online: {
           opening: openingOnline,
           received: flows.Online.received,
+          salesInitial: flows.Online.salesInitial,
+          clientRecoveries: flows.Online.clientRecoveries,
           paidOut: flows.Online.paidOut,
+          purchasesInitial: flows.Online.purchasesInitial,
+          supplierUdharPaid: flows.Online.supplierUdharPaid,
           expenses: flows.Online.expenses,
-          balance: onlineBalance
+          balance: onlineBalance,
+          liveAvailable: r2(liveOnline)
         },
         totalLiquidity: r2(cashBalance + onlineBalance),
+        liveTotalLiquidity: r2(liveCash + liveOnline),
         dailyMovements: dailyRes.rows
       }
     });
@@ -1399,7 +1659,7 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
     if (type === 'sales') {
       let q = `
         SELECT i.invoice_no, i.date, i.party_name, i.type, i.payment_method,
-               i.product_total, i.service_total, i.total, i.paid, i.credit_adjusted,
+               i.product_total, i.service_total, i.total, i.paid, i.initial_paid, i.credit_adjusted,
                GREATEST(0, i.total - i.paid) as remaining, i.payment_status, i.created_by_name
         FROM invoices i
         WHERE i.branch_id = $1 AND i.is_voided = FALSE AND i.type IN ('Sales Invoice','Exchange Invoice','Custom Sale Invoice')
@@ -1410,18 +1670,44 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
       const r = await db.query(q, p);
       csv = toCSV(r.rows, [
         { key: 'invoice_no', label: 'Invoice No' },
-        { key: 'date', label: 'Date' },
+        { key: 'date', label: 'Invoice Date' },
         { key: 'party_name', label: 'Customer' },
         { key: 'type', label: 'Type' },
         { key: 'payment_method', label: 'Payment Method' },
         { key: 'product_total', label: 'Product Total (PKR)' },
         { key: 'service_total', label: 'Service Total (PKR)' },
         { key: 'total', label: 'Invoice Total (PKR)' },
-        { key: 'paid', label: 'Amount Paid (PKR)' },
+        { key: 'initial_paid', label: 'Initial Paid (PKR)' },
+        { key: 'paid', label: 'Total Paid (PKR)' },
         { key: 'credit_adjusted', label: 'Credit Adjusted (PKR)' },
         { key: 'remaining', label: 'Outstanding (PKR)' },
         { key: 'payment_status', label: 'Status' },
         { key: 'created_by_name', label: 'Sold By' }
+      ]);
+
+    } else if (type === 'collections' || type === 'recoveries') {
+      let q = `
+        SELECT p.date, p.party_name, p.invoice_no,
+               CASE WHEN p.is_initial_settlement THEN 'Initial POS Payment' ELSE 'Client Udhar Recovery' END as collection_type,
+               p.payment_method, p.amount, p.reference_id, p.notes, p.created_by_name
+        FROM payments p
+        WHERE p.branch_id = $1 AND p.direction = 'Received' AND p.affects_money = TRUE
+          AND (p.party_type = 'Customer' OR p.account_type = 'Customer Receivable')
+      `;
+      const p = [bId];
+      q = applyDateFilter(q, p, from, to, 'p.date');
+      q += ' ORDER BY p.date DESC, p.created_at DESC';
+      const r = await db.query(q, p);
+      csv = toCSV(r.rows, [
+        { key: 'date', label: 'Payment Received Date' },
+        { key: 'party_name', label: 'Customer' },
+        { key: 'invoice_no', label: 'Invoice No' },
+        { key: 'collection_type', label: 'Type' },
+        { key: 'payment_method', label: 'Payment Method' },
+        { key: 'amount', label: 'Amount Collected (PKR)' },
+        { key: 'reference_id', label: 'Reference ID' },
+        { key: 'notes', label: 'Notes' },
+        { key: 'created_by_name', label: 'Collected By' }
       ]);
 
     } else if (type === 'returns') {
@@ -1453,7 +1739,7 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
     } else if (type === 'purchases') {
       let q = `
         SELECT i.invoice_no, i.date, i.party_name, i.type, i.payment_method,
-               i.total, i.paid, i.credit_adjusted,
+               i.total, i.initial_paid, i.paid, i.credit_adjusted,
                GREATEST(0, i.total - i.paid - i.credit_adjusted) as remaining,
                i.payment_status, i.created_by_name
         FROM invoices i
@@ -1465,16 +1751,42 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
       const r = await db.query(q, p);
       csv = toCSV(r.rows, [
         { key: 'invoice_no', label: 'Invoice No' },
-        { key: 'date', label: 'Date' },
-        { key: 'party_name', label: 'Party' },
+        { key: 'date', label: 'Purchase Date' },
+        { key: 'party_name', label: 'Supplier / Vendor' },
         { key: 'type', label: 'Type' },
         { key: 'payment_method', label: 'Payment Method' },
         { key: 'total', label: 'Total (PKR)' },
-        { key: 'paid', label: 'Paid (PKR)' },
+        { key: 'initial_paid', label: 'Initial Paid (PKR)' },
+        { key: 'paid', label: 'Total Paid (PKR)' },
         { key: 'credit_adjusted', label: 'Credit Adjusted (PKR)' },
         { key: 'remaining', label: 'Outstanding (PKR)' },
         { key: 'payment_status', label: 'Status' },
         { key: 'created_by_name', label: 'Recorded By' }
+      ]);
+
+    } else if (type === 'supplier-payments') {
+      let q = `
+        SELECT p.date, p.party_name as vendor_name, p.invoice_no,
+               CASE WHEN p.is_initial_settlement THEN 'Initial Purchase Payment' ELSE 'Supplier Udhar Settlement' END as payment_type,
+               p.payment_method, p.amount, p.reference_id, p.notes, p.created_by_name
+        FROM payments p
+        WHERE p.branch_id = $1 AND p.direction = 'Paid' AND p.affects_money = TRUE
+          AND (p.party_type = 'Vendor' OR p.account_type = 'Vendor Payable')
+      `;
+      const p = [bId];
+      q = applyDateFilter(q, p, from, to, 'p.date');
+      q += ' ORDER BY p.date DESC, p.created_at DESC';
+      const r = await db.query(q, p);
+      csv = toCSV(r.rows, [
+        { key: 'date', label: 'Payment Date' },
+        { key: 'vendor_name', label: 'Supplier / Vendor' },
+        { key: 'invoice_no', label: 'Invoice No' },
+        { key: 'payment_type', label: 'Type' },
+        { key: 'payment_method', label: 'Payment Method' },
+        { key: 'amount', label: 'Amount Paid (PKR)' },
+        { key: 'reference_id', label: 'Reference ID' },
+        { key: 'notes', label: 'Notes' },
+        { key: 'created_by_name', label: 'Paid By' }
       ]);
 
     } else if (type === 'vendor-returns') {
@@ -1520,11 +1832,26 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
       const r = await db.query(`
         SELECT p.code, p.inventory_type, p.category_name, p.brand, p.model, p.condition,
                p.initial_stock, p.stock_in, p.stock_out, p.current_stock,
-               p.cost_price, p.expected_sale_price,
-               (p.current_stock * p.cost_price) as cost_value,
-               (p.current_stock * p.expected_sale_price) as sale_value,
+               COALESCE(pb.fifo_avg_cost, p.cost_price) as cost_price,
+               COALESCE(pb.fifo_avg_sale, p.expected_sale_price) as expected_sale_price,
+               COALESCE(pb.batch_cost_val, p.current_stock * p.cost_price) as cost_value,
+               COALESCE(pb.batch_sale_val, p.current_stock * p.expected_sale_price) as sale_value,
+               COALESCE(pb.active_batch_count, CASE WHEN p.current_stock > 0 THEN 1 ELSE 0 END) as active_batches,
                p.low_stock_alert, p.date_added
         FROM products p
+        LEFT JOIN (
+          SELECT 
+            pb.product_id,
+            pb.branch_id,
+            COALESCE(SUM(pb.quantity * pb.cost_price), 0) AS batch_cost_val,
+            COALESCE(SUM(pb.quantity * pb.selling_price), 0) AS batch_sale_val,
+            COUNT(CASE WHEN pb.quantity > 0 THEN 1 END) AS active_batch_count,
+            CASE WHEN SUM(pb.quantity) > 0 THEN ROUND(SUM(pb.quantity * pb.cost_price) / SUM(pb.quantity), 2) ELSE 0 END AS fifo_avg_cost,
+            CASE WHEN SUM(pb.quantity) > 0 THEN ROUND(SUM(pb.quantity * pb.selling_price) / SUM(pb.quantity), 2) ELSE 0 END AS fifo_avg_sale
+          FROM product_batches pb
+          WHERE pb.quantity > 0 AND (pb.expiry_date IS NULL OR pb.expiry_date >= CURRENT_DATE)
+          GROUP BY pb.product_id, pb.branch_id
+        ) pb ON pb.product_id = p.id AND pb.branch_id = p.branch_id
         WHERE p.branch_id = $1
         ORDER BY p.category_name, p.brand
       `, [bId]);
@@ -1539,10 +1866,11 @@ router.get('/csv/:type', requireAdmin, async (req, res, next) => {
         { key: 'stock_in', label: 'Stock IN' },
         { key: 'stock_out', label: 'Stock OUT' },
         { key: 'current_stock', label: 'Current Stock' },
-        { key: 'cost_price', label: 'Cost Price (PKR)' },
-        { key: 'expected_sale_price', label: 'Sale Price EP (PKR)' },
-        { key: 'cost_value', label: 'Stock Cost Value (PKR)' },
-        { key: 'sale_value', label: 'Stock Sale Value (PKR)' },
+        { key: 'active_batches', label: 'Active Batches (FIFO)' },
+        { key: 'cost_price', label: 'Cost Price (FIFO Avg PKR)' },
+        { key: 'expected_sale_price', label: 'Sale Price (FIFO Avg PKR)' },
+        { key: 'cost_value', label: 'Stock Cost Value (FIFO PKR)' },
+        { key: 'sale_value', label: 'Stock Sale Value (FIFO PKR)' },
         { key: 'low_stock_alert', label: 'Low Stock Alert' },
         { key: 'date_added', label: 'Date Added' }
       ]);

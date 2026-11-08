@@ -118,7 +118,7 @@ router.get('/drawer-transactions', requireSalesOrAdmin, cacheRoute(60), async (r
 // GET /api/accounts - Filtered receivables & payables (Cached 60s)
 router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
-    const { type, partyType, partyId, status } = req.query;
+    const { type, partyType, partyId, status, from, to } = req.query;
     const branchContext = require('../../middleware/branchContext');
     const branchStore = branchContext.getBranchStore();
     const bId = Number(req.headers['x-branch-id']) || branchStore?.branchId || req.branchId || 1;
@@ -143,6 +143,16 @@ router.get('/', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
     if (status) {
       params.push(status);
       queryText += ` AND status = $${params.length}`;
+    }
+
+    if (from) {
+      params.push(from);
+      queryText += ` AND date::date >= $${params.length}::date`;
+    }
+
+    if (to) {
+      params.push(to);
+      queryText += ` AND date::date <= $${params.length}::date`;
     }
 
     queryText += ' ORDER BY date DESC, created_at DESC';
@@ -349,7 +359,7 @@ router.post('/vendor-group-payment', requireSalesOrAdmin, async (req, res, next)
 
       // 5. Execute settlements and insert payment records
       const creator = getCreator(req.user);
-      const paymentDate = date ? new Date(date) : new Date();
+      const paymentDate = (date || req.body.paymentDate) ? new Date(date || req.body.paymentDate) : new Date();
       const groupNote = notes && notes.trim() ? notes.trim() : `Group settlement for ${plannedAllocations.length} bill(s)`;
       const recordedPayments = [];
       let totalActualSettled = 0;
@@ -446,7 +456,8 @@ router.post('/vendor-group-payment', requireSalesOrAdmin, async (req, res, next)
 router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { amount: reqAmount, paymentMethod, referenceId, notes, date } = req.body;
+    const { amount: reqAmount, paymentMethod, referenceId, notes, date, paymentDate: bodyPaymentDate } = req.body;
+    const rawDate = date || bodyPaymentDate;
 
     const payAmount = parseFloat(reqAmount || 0);
     if (isNaN(payAmount) || payAmount <= 0) {
@@ -553,20 +564,22 @@ router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
       const creator = getCreator(req.user);
       const payId = await getNextEntityId('payments', 'id', 'PAY', 5, client);
       const direction = account.type.includes('Receivable') ? 'Received' : 'Paid';
+      const paymentDate = rawDate ? (typeof rawDate === 'string' && rawDate.includes('T') ? rawDate.split('T')[0] : rawDate) : new Date().toISOString().split('T')[0];
+      const accountBranchId = account.branch_id || branchId;
 
       const payRes = await client.query(
         `INSERT INTO payments (
-          id, account_id, invoice_id, invoice_no, party_type, party_id, party_name,
+          id, branch_id, account_id, invoice_id, invoice_no, party_type, party_id, party_name,
           account_type, direction, amount, date, payment_method, reference_id, notes,
           affects_money, is_initial_settlement, created_by, created_by_name
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7,
-          $8, $9, $10, $11, $12, $13, $14,
-          TRUE, FALSE, $15, $16
+          $1, $2, $3, $4, $5, $6, $7, $8,
+          $9, $10, $11, $12, $13, $14, $15,
+          TRUE, FALSE, $16, $17
         ) RETURNING *`,
         [
-          payId, id, account.invoice_id, account.invoice_no, account.party_type, account.party_id, account.party_name,
-          account.type, direction, payAmount, date || new Date(), pMethod, referenceId ? referenceId.trim() : null, notes ? notes.trim() : null,
+          payId, accountBranchId, id, account.invoice_id, account.invoice_no, account.party_type, account.party_id, account.party_name,
+          account.type, direction, payAmount, paymentDate, pMethod, referenceId ? referenceId.trim() : null, notes ? notes.trim() : null,
           creator.id, creator.name
         ]
       );

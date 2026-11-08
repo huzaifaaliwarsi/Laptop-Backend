@@ -18,8 +18,8 @@ async function reserveNumber(client, branchId, key, floor) {
 }
 
 async function nextBusinessCode(client, branchId, table, column, prefix, width, floor = 1n) {
-  // Identifiers come only from fixed callers below, never from request data.
-  const existing = await client.query(`SELECT ${column} AS code FROM ${table} WHERE branch_id=$1`, [branchId]);
+  // Check existing codes across the table for this prefix to ensure absolute global uniqueness
+  const existing = await client.query(`SELECT ${column} AS code FROM ${table} WHERE ${column} LIKE $1`, [`${prefix}-%`]);
   for (const row of existing.rows) {
     const value = String(row.code);
     if (!value.startsWith(prefix + '-')) continue;

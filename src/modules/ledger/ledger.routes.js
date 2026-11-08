@@ -11,6 +11,7 @@ router.use(authenticateToken);
 router.get('/party/:partyType/:partyId', requireSalesOrAdmin, cacheRoute(60), async (req, res, next) => {
   try {
     const { partyType, partyId } = req.params;
+    const { from, to } = req.query;
     const branchId = getBranchIdFromReq(req);
     const isVendor = partyType.toLowerCase() === 'vendor';
 
@@ -282,24 +283,83 @@ router.get('/party/:partyType/:partyId', requireSalesOrAdmin, cacheRoute(60), as
     });
 
     let running = 0;
-    const transactionLog = rawEntries.map(e => {
-      running += e.effect;
-      return {
-        ...e,
-        running: Math.round(running * 100) / 100
-      };
+    let openingBalance = 0;
+    const allCalculatedEntries = [];
+
+    const toDateStr = (d) => {
+      if (!d) return '';
+      if (typeof d === 'string') {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+        const parsed = new Date(d);
+        if (isNaN(parsed.getTime())) return d.slice(0, 10);
+        const y = parsed.getFullYear();
+        const m = String(parsed.getMonth() + 1).padStart(2, '0');
+        const day = String(parsed.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+      if (d instanceof Date) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+      return String(d).slice(0, 10);
+    };
+
+    rawEntries.forEach(e => {
+      const eDate = toDateStr(e.date);
+      if (from && eDate < from) {
+        openingBalance += e.effect;
+        running += e.effect;
+      } else {
+        running += e.effect;
+        allCalculatedEntries.push({
+          ...e,
+          running: Math.round(running * 100) / 100
+        });
+      }
     });
+
+    openingBalance = Math.round(openingBalance * 100) / 100;
+
+    let periodFilteredLog = allCalculatedEntries;
+    if (to) {
+      periodFilteredLog = periodFilteredLog.filter(e => toDateStr(e.date) <= to);
+    }
+
+    if (from && Math.abs(openingBalance) > 0.005) {
+      periodFilteredLog.unshift({
+        id: 'OPENING',
+        date: from,
+        createdAt: from,
+        order: 0,
+        reference: 'OPENING-BAL',
+        entryType: 'opening',
+        description: `Opening Balance as of ${from}`,
+        paid: 0,
+        received: 0,
+        billAmount: 0,
+        effect: 0,
+        running: openingBalance,
+        balanceNature: isVendor ? (openingBalance > 0 ? 'Vendor Payable' : 'Vendor Receivable') : (openingBalance > 0 ? 'Customer Receivable' : 'Customer Payable')
+      });
+    }
 
     const openReceivables = accountsRes.rows.filter(a => a.status === 'Open' && a.type.includes('Receivable')).reduce((s, a) => s + parseFloat(a.remaining), 0);
     const openPayables = accountsRes.rows.filter(a => a.status === 'Open' && a.type.includes('Payable')).reduce((s, a) => s + parseFloat(a.remaining), 0);
     const netBalance = isVendor ? openPayables - openReceivables : openReceivables - openPayables;
 
-    const totalPurchases = isVendor ? invoicesRes.rows.reduce((s, i) => s + parseFloat(i.total || 0), 0) : 0;
-    const totalSales = !isVendor ? invoicesRes.rows.reduce((s, i) => s + parseFloat(i.total || 0), 0) : 0;
-    const paymentsMade = paymentsRes.rows.filter(p => p.direction === 'Paid').reduce((s, p) => s + parseFloat(p.amount || 0), 0);
-    const receivedFromParty = paymentsRes.rows.filter(p => p.direction === 'Received' || p.direction === 'Adjusted').reduce((s, p) => s + parseFloat(p.amount || 0), 0);
-    const totalReturns = isVendor ? returnsRes.rows.reduce((s, r) => s + parseFloat(r.amount || 0), 0) : 0;
-    const totalCustomerCredits = !isVendor ? invoicesRes.rows.filter(i => i.type === 'Customer Purchase' || (i.type === 'Exchange Invoice' && i.exchange_case === 'Shop Pays Customer')).reduce((s, i) => s + parseFloat(i.total || 0), 0) : 0;
+    // Period specific or all-time summary
+    const invInPeriod = invoicesRes.rows.filter(i => (!from || toDateStr(i.date) >= from) && (!to || toDateStr(i.date) <= to));
+    const payInPeriod = paymentsRes.rows.filter(p => (!from || toDateStr(p.date) >= from) && (!to || toDateStr(p.date) <= to));
+    const retInPeriod = returnsRes.rows.filter(r => (!from || toDateStr(r.date) >= from) && (!to || toDateStr(r.date) <= to));
+
+    const totalPurchases = isVendor ? invInPeriod.reduce((s, i) => s + parseFloat(i.total || 0), 0) : 0;
+    const totalSales = !isVendor ? invInPeriod.reduce((s, i) => s + parseFloat(i.total || 0), 0) : 0;
+    const paymentsMade = payInPeriod.filter(p => p.direction === 'Paid').reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+    const receivedFromParty = payInPeriod.filter(p => p.direction === 'Received' || p.direction === 'Adjusted').reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+    const totalReturns = isVendor ? retInPeriod.reduce((s, r) => s + parseFloat(r.amount || 0), 0) : 0;
+    const totalCustomerCredits = !isVendor ? invInPeriod.filter(i => i.type === 'Customer Purchase' || (i.type === 'Exchange Invoice' && i.exchange_case === 'Shop Pays Customer')).reduce((s, i) => s + parseFloat(i.total || 0), 0) : 0;
 
     return res.json({
       success: true,
@@ -320,11 +380,12 @@ router.get('/party/:partyType/:partyId', requireSalesOrAdmin, cacheRoute(60), as
           totalCustomerCredits,
           openReceivable: openReceivables,
           openPayable: openPayables,
+          openingBalance,
           netBalance,
           netBalanceLabel: Math.abs(netBalance) < 0.005 ? 'Settled' : isVendor ? (netBalance > 0 ? `Payable PKR ${netBalance.toFixed(2)}` : `Receivable PKR ${Math.abs(netBalance).toFixed(2)}`) : (netBalance > 0 ? `Receivable PKR ${netBalance.toFixed(2)}` : `Payable PKR ${Math.abs(netBalance).toFixed(2)}`)
         },
         groupedBills,
-        transactionLog: transactionLog.reverse()
+        transactionLog: periodFilteredLog.reverse()
       }
     });
   } catch (error) {

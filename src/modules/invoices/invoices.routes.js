@@ -143,7 +143,9 @@ router.post('/sale', requireSalesOrAdmin, async (req, res, next) => {
       '/api/dashboard*',
       '/api/products*',
       '/api/customers*',
-      '/api/ledger*'
+      '/api/accounts*',
+      '/api/ledger*',
+      '/api/reports*'
     ]);
     return res.status(201).json({
       success: true,
@@ -164,7 +166,9 @@ router.post('/customer-purchase', requireSalesOrAdmin, async (req, res, next) =>
       '/api/dashboard*',
       '/api/products*',
       '/api/customers*',
-      '/api/ledger*'
+      '/api/accounts*',
+      '/api/ledger*',
+      '/api/reports*'
     ]);
     return res.status(201).json({
       success: true,
@@ -185,7 +189,9 @@ router.post('/vendor-purchase', requireAdmin, async (req, res, next) => {
       '/api/dashboard*',
       '/api/products*',
       '/api/vendors*',
-      '/api/ledger*'
+      '/api/accounts*',
+      '/api/ledger*',
+      '/api/reports*'
     ]);
     return res.status(201).json({
       success: true,

@@ -136,18 +136,30 @@ async function computeBranchMetrics(pool, branchMeta = {}, from = null, to = nul
         COALESCE(SUM(CASE WHEN type = 'Vendor Payable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS vendor_payable,
         COALESCE(SUM(CASE WHEN type = 'Vendor Receivable' AND status = 'Open' THEN remaining ELSE 0 END), 0) AS vendor_receivable
       FROM accounts
-    `),
+      WHERE branch_id = $1
+    `, [branchMeta.id]),
 
-    // 6. Inventory Valuation
+    // 6. Inventory Valuation (Strict FIFO / FEFO across batches)
     pool.query(`
       SELECT 
-        COALESCE(SUM(current_stock * cost_price), 0) AS stock_cost_value,
-        COALESCE(SUM(current_stock * expected_sale_price), 0) AS stock_sale_value,
-        COALESCE(SUM(current_stock), 0) AS total_stock_items,
+        COALESCE(SUM(COALESCE(pb.batch_cost_val, p.current_stock * p.cost_price)), 0) AS stock_cost_value,
+        COALESCE(SUM(COALESCE(pb.batch_sale_val, p.current_stock * p.expected_sale_price)), 0) AS stock_sale_value,
+        COALESCE(SUM(p.current_stock), 0) AS total_stock_items,
         COUNT(*) AS total_sku_count,
-        COUNT(CASE WHEN current_stock <= low_stock_alert THEN 1 END) AS low_stock_count
-      FROM products
-    `),
+        COUNT(CASE WHEN p.current_stock <= p.low_stock_alert THEN 1 END) AS low_stock_count
+      FROM products p
+      LEFT JOIN (
+        SELECT 
+          pb.product_id,
+          pb.branch_id,
+          COALESCE(SUM(pb.quantity * pb.cost_price), 0) AS batch_cost_val,
+          COALESCE(SUM(pb.quantity * pb.selling_price), 0) AS batch_sale_val
+        FROM product_batches pb
+        WHERE pb.quantity > 0 AND (pb.expiry_date IS NULL OR pb.expiry_date >= CURRENT_DATE)
+        GROUP BY pb.product_id, pb.branch_id
+      ) pb ON pb.product_id = p.id AND pb.branch_id = p.branch_id
+      WHERE p.branch_id = $1
+    `, [branchMeta.id]),
 
     // 7. Cash Drawer & Online Liquidity
     getAvailableBalance('Cash', pool, branchMeta.id),
