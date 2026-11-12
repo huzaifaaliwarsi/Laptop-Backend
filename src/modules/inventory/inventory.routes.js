@@ -430,6 +430,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
       const existingProd = existingRes.rows[0];
 
+      const customFieldEntries = req.body.customFields && typeof req.body.customFields === 'object'
+        ? Object.entries(req.body.customFields)
+          .filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+          .map(([k, v]) => `${k}: ${String(v).trim()}`)
+        : [];
+
       const specifications = [
         screenSize ? `Screen/Size: ${screenSize}` : null,
         processor ? `Processor: ${processor}` : null,
@@ -439,6 +445,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         graphicsCard ? `Graphics: ${graphicsCard}` : null,
         accessoryCategory ? `Accessory Category: ${accessoryCategory}` : null,
         description ? `Description: ${description}` : null,
+        ...customFieldEntries,
         others ? `Others: ${others}` : null
       ].filter(Boolean).join(' | ');
 

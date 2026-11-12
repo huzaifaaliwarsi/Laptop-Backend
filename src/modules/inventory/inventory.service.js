@@ -50,7 +50,10 @@ class InventoryService {
         COALESCE(pb.batch_sale_val, p.current_stock * p.expected_sale_price) as stock_sale_value,
         COALESCE(pb.active_batch_count, CASE WHEN p.current_stock > 0 THEN 1 ELSE 0 END) as active_batch_count,
         COALESCE(pb.fifo_avg_cost, p.cost_price) as fifo_avg_cost,
-        COALESCE(pb.fifo_avg_sale, p.expected_sale_price) as fifo_avg_sale
+        COALESCE(pb.fifo_avg_sale, p.expected_sale_price) as fifo_avg_sale,
+        ${userRole === 'technician' ? 'NULL as vendor_paid' : 'vi.paid as vendor_paid'},
+        vi.payment_method as vendor_payment_method,
+        vi.reference_id as vendor_reference_id
       FROM products p
       LEFT JOIN (
         SELECT 
@@ -65,6 +68,16 @@ class InventoryService {
         WHERE pb.quantity > 0 AND (pb.expiry_date IS NULL OR pb.expiry_date >= CURRENT_DATE)
         GROUP BY pb.product_id, pb.branch_id
       ) pb ON pb.product_id = p.id AND pb.branch_id = p.branch_id
+      LEFT JOIN LATERAL (
+        SELECT i.paid, i.payment_method, i.reference_id
+        FROM invoice_items ii
+        JOIN invoices i ON i.id = ii.invoice_id
+        WHERE ii.product_id = p.id
+          AND i.type_key = 'vendor_purchase'
+          AND i.branch_id = p.branch_id
+        ORDER BY i.created_at DESC
+        LIMIT 1
+      ) vi ON TRUE
       WHERE 1=1
     `;
     const branchContext = require('../../middleware/branchContext');
@@ -144,6 +157,7 @@ class InventoryService {
       description: row.description,
       others: row.others,
       specifications: row.specifications,
+      customFields: (typeof row.custom_fields === 'string' ? JSON.parse(row.custom_fields) : row.custom_fields) || {},
       condition: row.condition,
       initialStock: parseInt(row.initial_stock || 0, 10),
       stockIn: parseInt(row.stock_in || 0, 10),
@@ -163,6 +177,9 @@ class InventoryService {
       sourceName: row.source_name,
       vendorId: row.source_id,
       vendorName: row.source_name,
+      vendorPaid: row.vendor_paid !== null && row.vendor_paid !== undefined ? parseFloat(row.vendor_paid) : null,
+      vendorPaymentMethod: row.vendor_payment_method || null,
+      vendorReferenceId: row.vendor_reference_id || null,
       purchaseInvoiceNo: row.purchase_invoice_no,
       dateAdded: row.date_added,
       expiryDate: row.expiry_date || null,
@@ -217,6 +234,7 @@ class InventoryService {
         description: row.description,
         others: row.others,
         specifications: row.specifications,
+        customFields: (typeof row.custom_fields === 'string' ? JSON.parse(row.custom_fields) : row.custom_fields) || {},
         condition: row.condition,
         initialStock: parseInt(row.initial_stock || 0, 10),
         stockIn: parseInt(row.stock_in || 0, 10),
