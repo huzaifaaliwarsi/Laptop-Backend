@@ -458,6 +458,25 @@ router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
     const { id } = req.params;
     const { amount: reqAmount, paymentMethod, referenceId, notes, date, paymentDate: bodyPaymentDate } = req.body;
     const rawDate = date || bodyPaymentDate;
+    const branchId = getBranchIdFromReq(req) || 1;
+    const cleanRequestKey = (req.body.requestKey || req.headers['x-request-key'] || req.headers['idempotency-key']) ? String(req.body.requestKey || req.headers['x-request-key'] || req.headers['idempotency-key']).trim() : null;
+
+    if (cleanRequestKey) {
+      const existingPay = await db.query(
+        `SELECT * FROM payments WHERE request_key = $1 AND branch_id = $2 LIMIT 1`,
+        [cleanRequestKey, branchId]
+      );
+      if (existingPay.rows.length > 0) {
+        return res.json({
+          success: true,
+          message: 'Payment already processed (idempotent replay)',
+          data: {
+            payment: existingPay.rows[0],
+            idempotent: true
+          }
+        });
+      }
+    }
 
     const payAmount = parseFloat(reqAmount || 0);
     if (isNaN(payAmount) || payAmount <= 0) {
@@ -571,16 +590,18 @@ router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
         `INSERT INTO payments (
           id, branch_id, account_id, invoice_id, invoice_no, party_type, party_id, party_name,
           account_type, direction, amount, date, payment_method, reference_id, notes,
-          affects_money, is_initial_settlement, created_by, created_by_name
+          affects_money, is_initial_settlement, is_initial, request_key,
+          created_by, created_by_name, collected_by_id, collected_by_name, paid_at
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8,
           $9, $10, $11, $12, $13, $14, $15,
-          TRUE, FALSE, $16, $17
+          TRUE, FALSE, FALSE, $16,
+          $17, $18, $17, $18, CURRENT_TIMESTAMP
         ) RETURNING *`,
         [
           payId, accountBranchId, id, account.invoice_id, account.invoice_no, account.party_type, account.party_id, account.party_name,
           account.type, direction, payAmount, paymentDate, pMethod, referenceId ? referenceId.trim() : null, notes ? notes.trim() : null,
-          creator.id, creator.name
+          cleanRequestKey, creator.id, creator.name
         ]
       );
 

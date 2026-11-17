@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../../config/db');
 const InvoiceService = require('./invoices.service');
+const InvoiceRegistryService = require('./invoice-registry.service');
 const authenticateToken = require('../../middleware/auth');
 const { requireAdmin, requireSalesOrAdmin } = require('../../middleware/rbac');
 const { getNextEntityId } = require('../../utils/codeGenerator');
@@ -34,99 +35,17 @@ router.get('/:id/pdf', authenticateToken, async (req, res, next) => {
 
 router.use(authenticateToken);
 
-// GET /api/invoices - Query invoices with filters (Cached 60s)
+// GET /api/invoices - Query unified transaction-level collection registry with filters (Cached 60s)
 router.get('/', cacheRoute(60), async (req, res, next) => {
   try {
-    const { search, type, status, from, to, page, limit } = req.query;
     const branchId = getBranchIdFromReq(req) || 1;
-    let queryText = 'SELECT * FROM invoices WHERE 1=1';
-    const params = [branchId];
-    queryText += ' AND branch_id = $1';
-
-    // Role scoping: Sales staff only see their own invoices
-    if (req.user.role === 'sales') {
-      params.push(req.user.id);
-      queryText += ` AND created_by = $${params.length}`;
-    }
-
-    if (search && String(search).trim() !== '') {
-      params.push(`%${search.trim().toLowerCase()}%`);
-      queryText += ` AND (
-        LOWER(invoice_no) LIKE $${params.length} OR
-        LOWER(party_name) LIKE $${params.length} OR
-        LOWER(COALESCE(contact, '')) LIKE $${params.length}
-      )`;
-    }
-
-    if (type) {
-      params.push(type);
-      queryText += ` AND (type = $${params.length} OR type_key = $${params.length})`;
-    }
-
-    if (status) {
-      params.push(status);
-      if (status === 'Voided') {
-        queryText += ` AND is_voided = TRUE`;
-      } else {
-        queryText += ` AND payment_status = $${params.length} AND is_voided = FALSE`;
-      }
-    }
-
-    if (from) {
-      params.push(from);
-      queryText += ` AND date >= $${params.length}`;
-    }
-
-    if (to) {
-      params.push(to);
-      queryText += ` AND date <= $${params.length}`;
-    }
-
-    queryText += ' ORDER BY date DESC, created_at DESC';
-
-    if (limit) {
-      const pageNum = parseInt(page || '1', 10);
-      const limitNum = parseInt(limit, 10);
-      const offset = (pageNum - 1) * limitNum;
-      params.push(limitNum);
-      queryText += ` LIMIT $${params.length}`;
-      params.push(offset);
-      queryText += ` OFFSET $${params.length}`;
-    }
-
-    const result = await db.query(queryText, params);
+    const result = await InvoiceRegistryService.getTransactionRegistry(req.query, req.user, branchId);
 
     return res.json({
       success: true,
-      data: result.rows.map(inv => ({
-        id: inv.id,
-        invoiceNo: inv.invoice_no,
-        type: inv.type,
-        typeKey: inv.type_key,
-        date: inv.date,
-        partyType: inv.party_type,
-        partyId: inv.party_id,
-        partyName: inv.party_name,
-        contact: inv.contact,
-        exchangeCase: inv.exchange_case,
-        productTotal: parseFloat(inv.product_total || 0),
-        serviceTotal: parseFloat(inv.service_total || 0),
-        total: parseFloat(inv.total || 0),
-        paid: parseFloat(inv.paid || 0),
-        initialPaid: parseFloat(inv.initial_paid || 0),
-        creditAdjusted: parseFloat(inv.credit_adjusted || 0),
-        balance: parseFloat(inv.balance || 0),
-        paymentMethod: inv.payment_method,
-        referenceId: inv.reference_id,
-        paymentStatus: inv.payment_status,
-        isVoided: inv.is_voided,
-        voidDate: inv.void_date,
-        voidReason: inv.void_reason,
-        refundAmount: parseFloat(inv.refund_amount || 0),
-        createdById: inv.created_by,
-        createdByName: inv.created_by_name,
-        createdAt: inv.created_at
-      }))
+      data: result.rows,
+      pagination: result.pagination,
+      summary: result.summary
     });
   } catch (error) {
     next(error);
@@ -363,6 +282,43 @@ router.get('/:id', cacheRoute(60), async (req, res, next) => {
     return res.json({
       success: true,
       data: invoice
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/invoices/:id/payment - Atomic, idempotent remaining installment collection
+router.post('/:id/payment', requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const branchId = getBranchIdFromReq(req) || 1;
+    const requestKey = req.body.requestKey || req.headers['x-request-key'] || req.headers['idempotency-key'];
+    const result = await InvoiceRegistryService.recordInvoicePayment(
+      req.params.id,
+      {
+        ...req.body,
+        requestKey
+      },
+      req.user,
+      branchId
+    );
+
+    await CacheService.invalidateBranchPatterns(branchId, [
+      '/api/invoices*',
+      '/api/accounts*',
+      '/api/ledger*',
+      '/api/dashboard*',
+      '/api/reports*',
+      '/api/customers*',
+      '/api/vendors*'
+    ]);
+
+    emitEvent('payment.recorded', result);
+
+    return res.status(201).json({
+      success: true,
+      message: result.message || 'Payment recorded successfully',
+      data: result
     });
   } catch (error) {
     next(error);

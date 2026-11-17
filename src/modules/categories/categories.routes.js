@@ -20,7 +20,7 @@ router.get('/', cacheRoute(300), async (req, res, next) => {
         GROUP BY pc.id, pc.name, pc.code_prefix, pc.is_system, pc.custom_fields, pc.created_at
         ORDER BY pc.id ASC
       `, [bId]),
-      db.query('SELECT id, name FROM expense_categories WHERE branch_id = $1 ORDER BY id ASC', [bId]),
+      db.query('SELECT id, name FROM expense_categories WHERE branch_id = $1 ORDER BY name ASC', [bId]),
       db.query('SELECT id, name FROM accessory_categories WHERE branch_id = $1 ORDER BY name ASC', [bId]),
       db.query(`
         SELECT rc.id, rc.name, rc.description, rc.is_active, rc.created_at, rc.updated_at,
@@ -325,7 +325,15 @@ router.delete('/spare-parts/:id', authenticateToken, requireSalesOrAdmin, async 
 router.get('/expense', cacheRoute(300), async (req, res, next) => {
   try {
     const bId = getBranchIdFromReq(req) || 1;
-    const result = await db.query('SELECT id, name FROM expense_categories WHERE branch_id = $1 ORDER BY id ASC', [bId]);
+    const result = await db.query(`
+      SELECT ec.id, ec.name, ec.created_at,
+             COUNT(e.id)::int AS expense_count
+      FROM expense_categories ec
+      LEFT JOIN expenses e ON (e.category_id = ec.id OR LOWER(e.category_name) = LOWER(ec.name)) AND e.branch_id = $1
+      WHERE ec.branch_id = $1
+      GROUP BY ec.id, ec.name, ec.created_at
+      ORDER BY ec.name ASC
+    `, [bId]);
     return res.json({
       success: true,
       data: result.rows
@@ -335,7 +343,7 @@ router.get('/expense', cacheRoute(300), async (req, res, next) => {
   }
 });
 
-router.post('/expense', authenticateToken, requireAdmin, async (req, res, next) => {
+router.post('/expense', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
     const bId = getBranchIdFromReq(req) || 1;
     const { name } = req.body;
@@ -348,8 +356,22 @@ router.post('/expense', authenticateToken, requireAdmin, async (req, res, next) 
     }
 
     const cleanName = String(name).trim();
+
+    // Check duplicate
+    const dup = await db.query(
+      'SELECT id FROM expense_categories WHERE LOWER(name) = LOWER($1) AND branch_id = $2',
+      [cleanName, bId]
+    );
+    if (dup.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        code: 'DUPLICATE_CATEGORY',
+        message: `Expense category "${cleanName}" already exists.`
+      });
+    }
+
     const insertRes = await db.query(
-      `INSERT INTO expense_categories (name, branch_id) VALUES ($1, $2) RETURNING id, name, branch_id`,
+      `INSERT INTO expense_categories (name, branch_id) VALUES ($1, $2) RETURNING id, name, branch_id, created_at`,
       [cleanName, bId]
     );
 
@@ -359,24 +381,102 @@ router.post('/expense', authenticateToken, requireAdmin, async (req, res, next) 
     return res.status(201).json({
       success: true,
       message: 'Expense category added successfully',
-      data: insertRes.rows[0]
+      data: {
+        ...insertRes.rows[0],
+        expense_count: 0
+      }
     });
   } catch (error) {
     next(error);
   }
 });
 
-router.delete('/expense/:id', authenticateToken, requireAdmin, async (req, res, next) => {
+router.put('/expense/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const bId = getBranchIdFromReq(req) || 1;
+    const { id } = req.params;
+    const { name } = req.body;
+    if (!name || String(name).trim() === '') {
+      return res.status(400).json({
+        success: false,
+        code: 'MISSING_NAME',
+        message: 'Expense category name is required.'
+      });
+    }
+
+    const cleanName = String(name).trim();
+
+    // Check if category exists
+    const currentRes = await db.query('SELECT * FROM expense_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
+    if (currentRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Expense category not found.'
+      });
+    }
+    const oldName = currentRes.rows[0].name;
+
+    // Check duplicate name
+    const dup = await db.query(
+      'SELECT id FROM expense_categories WHERE LOWER(name) = LOWER($1) AND branch_id = $2 AND id != $3',
+      [cleanName, bId, id]
+    );
+    if (dup.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        code: 'DUPLICATE_CATEGORY',
+        message: `Expense category "${cleanName}" already exists.`
+      });
+    }
+
+    const updateRes = await db.query(
+      'UPDATE expense_categories SET name = $1 WHERE id = $2 AND branch_id = $3 RETURNING id, name, branch_id, created_at',
+      [cleanName, id, bId]
+    );
+
+    // Also update expenses table to sync category_name
+    await db.query(
+      'UPDATE expenses SET category_name = $1 WHERE (category_id = $2 OR LOWER(category_name) = LOWER($3)) AND branch_id = $4',
+      [cleanName, id, oldName, bId]
+    );
+
+    await CacheService.invalidateBranchPattern(bId, '/api/categories*');
+    await CacheService.invalidateBranchPattern(bId, '/api/expenses*');
+    emitEvent('categories.expense_updated', updateRes.rows[0]);
+
+    return res.json({
+      success: true,
+      message: 'Expense category updated successfully',
+      data: updateRes.rows[0]
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/expense/:id', authenticateToken, requireSalesOrAdmin, async (req, res, next) => {
   try {
     const bId = getBranchIdFromReq(req) || 1;
     const { id } = req.params;
 
-    const inUse = await db.query('SELECT id FROM expenses WHERE category_id = $1 AND branch_id = $2 LIMIT 1', [id, bId]);
+    const currentRes = await db.query('SELECT * FROM expense_categories WHERE id = $1 AND branch_id = $2', [id, bId]);
+    if (currentRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Expense category not found.'
+      });
+    }
+    const catName = currentRes.rows[0].name;
+
+    const inUse = await db.query(
+      'SELECT id FROM expenses WHERE (category_id = $1 OR LOWER(category_name) = LOWER($2)) AND branch_id = $3 LIMIT 1',
+      [id, catName, bId]
+    );
     if (inUse.rows.length > 0) {
       return res.status(400).json({
         success: false,
         code: 'CATEGORY_IN_USE',
-        message: 'This category is already referenced by recorded expenses.'
+        message: `Category "${catName}" is already referenced by recorded expenses and cannot be deleted.`
       });
     }
 

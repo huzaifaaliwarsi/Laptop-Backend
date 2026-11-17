@@ -1417,6 +1417,11 @@ class InvoiceService {
       [invoice.id]
     );
 
+    const paymentsRes = await db.query(
+      `SELECT * FROM payments WHERE invoice_id = $1 ORDER BY date ASC, created_at ASC`,
+      [invoice.id]
+    );
+
     // Fetch Party Info from customers or vendors table if partyId is available
     let partyAddress = invoice.party_address || '';
     let partyTaxId = invoice.party_tax_id || '';
@@ -1548,6 +1553,19 @@ class InvoiceService {
       createdById: invoice.created_by,
       createdByName: invoice.created_by_name,
       createdAt: invoice.created_at,
+      payments: paymentsRes.rows.map(p => ({
+        id: p.id,
+        amount: parseFloat(p.amount || 0),
+        date: p.date,
+        paidAt: p.paid_at || p.created_at,
+        paymentMethod: p.payment_method,
+        referenceId: p.reference_id,
+        notes: p.notes,
+        isInitial: p.is_initial || p.is_initial_settlement || false,
+        collectorId: p.collected_by_id || p.created_by,
+        collectorName: p.collected_by_name || p.created_by_name || 'Admin',
+        createdAt: p.created_at
+      })),
       items: computedItems.map(item => {
         const qty = parseFloat(item.quantity || 1);
         const rate = parseFloat(item.unit_price || 0);
